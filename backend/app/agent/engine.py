@@ -9,11 +9,18 @@ from typing import Dict, Any
 from datetime import datetime
 
 # Add the source path to import the existing agent
-# The agent is in the /agent/src folder at project root
-AGENT_PATH = Path(__file__).parent.parent.parent.parent
-AGENT_SRC_PATH = AGENT_PATH / "agent" / "src"
-sys.path.insert(0, str(AGENT_PATH))
-sys.path.insert(0, str(AGENT_SRC_PATH))
+# The agent code is in /agent/src, and graph.py imports from 'src.models'
+# So we need to add /agent to path (for 'src.X' imports) 
+# AND /agent/src to path (for direct 'graph' imports)
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+AGENT_DIR = PROJECT_ROOT / "agent"
+AGENT_SRC_DIR = AGENT_DIR / "src"
+
+# Insert paths if not already present
+if str(AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_DIR))
+if str(AGENT_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_SRC_DIR))
 
 
 class TradingAgentEngine:
