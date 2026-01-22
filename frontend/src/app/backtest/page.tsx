@@ -1,42 +1,35 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Header } from "@/components/layout/Header";
-import { TradingPairSelector } from "@/components/dashboard/TradingPairSelector";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { 
+    getHealth, 
+    analyzeMarket, 
+    TradeSetupResponse, 
+    getMT5Status, 
+    getMT5Symbols, 
+    connectMT5 
+} from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
-import { getHealth, analyzeMarket, TradeSetupResponse } from "@/lib/api";
-import {
-    Play,
-    Pause,
-    SkipForward,
-    SkipBack,
-    RotateCcw,
-    Loader2,
-    Calendar,
-    ArrowLeft,
-    ChevronRight,
-    ChevronLeft,
-    Database
-} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { ArrowLeft, Keyboard } from "lucide-react";
 import Link from "next/link";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// Backtest components
+import { CandlestickChart } from "@/components/backtest/CandlestickChart";
+import { BacktestControlBar } from "@/components/backtest/BacktestControlBar";
+import { BacktestAnalysisPanel } from "@/components/backtest/BacktestAnalysisPanel";
+import { BacktestStatsBar } from "@/components/backtest/BacktestStatsBar";
+import { BacktestConfigSheet } from "@/components/backtest/BacktestConfigSheet";
+import {
+    Tooltip,
+    TooltipContent,
+    TooltipProvider,
+    TooltipTrigger,
+} from "@/components/ui/tooltip";
 
-// Speed options for playback
-const speedOptions = [
-    { value: 1, label: "1x" },
-    { value: 2, label: "2x" },
-    { value: 5, label: "5x" },
-    { value: 10, label: "10x" },
-];
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 interface BacktestStatus {
     loaded: boolean;
@@ -65,24 +58,68 @@ interface BacktestSnapshot {
     }>>;
 }
 
+interface BacktestConfig {
+    symbol: string;
+    fromDate: string;
+    toDate: string;
+    timeframes: string[];
+}
+
 export default function BacktestPage() {
     const queryClient = useQueryClient();
-    const [selectedPair, setSelectedPair] = useState("EURUSD");
-    const [fromDate, setFromDate] = useState(() => {
-        const date = new Date();
-        date.setDate(date.getDate() - 7); // 1 week ago
-        return date.toISOString().split('T')[0];
-    });
-    const [toDate, setToDate] = useState(() => new Date().toISOString().split('T')[0]);
+    
+    // Config state
+    const [config, setConfig] = useState<BacktestConfig>(() => ({
+        symbol: "EURUSD",
+        fromDate: (() => {
+            const date = new Date();
+            date.setDate(date.getDate() - 7);
+            return date.toISOString().split('T')[0];
+        })(),
+        toDate: new Date().toISOString().split('T')[0],
+        timeframes: ["1H", "15M", "5M"],
+    }));
+    
+    // UI state
+    const [configOpen, setConfigOpen] = useState(false);
+    const [selectedTimeframe, setSelectedTimeframe] = useState("1H");
     const [speed, setSpeed] = useState(1);
     const [isPlaying, setIsPlaying] = useState(false);
     const [analysisResult, setAnalysisResult] = useState<TradeSetupResponse | null>(null);
+    const [dataSource, setDataSource] = useState<"mt5" | "sample">("sample");
+    const [currentSnapshot, setCurrentSnapshot] = useState<BacktestSnapshot | null>(null);
 
+    // Health query
     const { data: health } = useQuery({
         queryKey: ["health"],
         queryFn: getHealth,
         refetchInterval: 5000,
     });
+
+    // MT5 Status query
+    const { data: mt5Status } = useQuery({
+        queryKey: ["mt5Status"],
+        queryFn: getMT5Status,
+        refetchInterval: 10000,
+    });
+
+    // MT5 Symbols query
+    const { data: mt5SymbolsData } = useQuery({
+        queryKey: ["mt5Symbols"],
+        queryFn: getMT5Symbols,
+        enabled: mt5Status?.connected === true,
+        staleTime: 60000,
+    });
+
+    // Auto-connect to MT5 on page load
+    useEffect(() => {
+        if (mt5Status?.available && !mt5Status?.connected) {
+            connectMT5().then(() => {
+                queryClient.invalidateQueries({ queryKey: ["mt5Status"] });
+                queryClient.invalidateQueries({ queryKey: ["mt5Symbols"] });
+            }).catch(() => {});
+        }
+    }, [mt5Status?.available, mt5Status?.connected, queryClient]);
 
     // Backtest status query
     const { data: backtestStatus, refetch: refetchStatus } = useQuery<BacktestStatus>({
@@ -102,20 +139,36 @@ export default function BacktestPage() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    symbol: selectedPair,
-                    from_date: new Date(fromDate).toISOString(),
-                    to_date: new Date(toDate).toISOString(),
-                    timeframes: ["1H", "15M", "5M"]
+                    symbol: config.symbol,
+                    from_date: new Date(config.fromDate).toISOString(),
+                    to_date: new Date(config.toDate).toISOString(),
+                    timeframes: config.timeframes,
                 }),
             });
             if (!res.ok) throw new Error("Failed to load backtest data");
             return res.json();
         },
-        onSuccess: () => {
+        onSuccess: (data) => {
             refetchStatus();
             setAnalysisResult(null);
+            setDataSource(data.source === "mt5" ? "mt5" : "sample");
+            // Fetch initial snapshot
+            fetchSnapshot();
         },
     });
+
+    // Fetch snapshot
+    const fetchSnapshot = async () => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/api/v1/market-data/backtest/snapshot`);
+            if (res.ok) {
+                const snapshot = await res.json();
+                setCurrentSnapshot(snapshot);
+            }
+        } catch (error) {
+            console.error("Failed to fetch snapshot:", error);
+        }
+    };
 
     // Step forward mutation
     const stepMutation = useMutation({
@@ -130,8 +183,8 @@ export default function BacktestPage() {
         },
         onSuccess: (data) => {
             refetchStatus();
-            // Auto-run analysis on step
             if (data.snapshot) {
+                setCurrentSnapshot(data.snapshot);
                 runAnalysis(data.snapshot);
             }
         },
@@ -148,7 +201,12 @@ export default function BacktestPage() {
             if (!res.ok) throw new Error("Failed to step back");
             return res.json();
         },
-        onSuccess: () => refetchStatus(),
+        onSuccess: (data) => {
+            refetchStatus();
+            if (data.snapshot) {
+                setCurrentSnapshot(data.snapshot);
+            }
+        },
     });
 
     // Reset mutation
@@ -164,10 +222,30 @@ export default function BacktestPage() {
             refetchStatus();
             setAnalysisResult(null);
             setIsPlaying(false);
+            fetchSnapshot();
         },
     });
 
-    // Run analysis on current snapshot
+    // Jump to mutation
+    const jumpMutation = useMutation({
+        mutationFn: async (index: number) => {
+            const res = await fetch(`${API_BASE_URL}/api/v1/market-data/backtest/jump`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ index }),
+            });
+            if (!res.ok) throw new Error("Failed to jump");
+            return res.json();
+        },
+        onSuccess: (data) => {
+            refetchStatus();
+            if (data.snapshot) {
+                setCurrentSnapshot(data.snapshot);
+            }
+        },
+    });
+
+    // Run analysis
     const runAnalysis = async (snapshot: BacktestSnapshot) => {
         try {
             const marketData = {
@@ -176,7 +254,7 @@ export default function BacktestPage() {
                 timeframe_bars: snapshot.timeframe_bars,
                 account_balance: 10000.0,
                 risk_pct: 1.0,
-                economic_calendar: []
+                economic_calendar: [],
             };
             const result = await analyzeMarket(marketData);
             setAnalysisResult(result);
@@ -185,295 +263,202 @@ export default function BacktestPage() {
         }
     };
 
-    // Playback effect
-    const handlePlay = () => {
-        setIsPlaying(true);
-    };
-
-    const handlePause = () => {
-        setIsPlaying(false);
-    };
+    // Playback controls
+    const handlePlay = () => setIsPlaying(true);
+    const handlePause = () => setIsPlaying(false);
 
     // Auto-step when playing
-    const handleAutoStep = () => {
-        if (isPlaying && backtestStatus?.loaded && !stepMutation.isPending) {
+    useEffect(() => {
+        if (!isPlaying || !backtestStatus?.loaded || stepMutation.isPending) return;
+        
+        const interval = setInterval(() => {
             if (backtestStatus.current_index < backtestStatus.total_bars - 1) {
                 stepMutation.mutate(1);
             } else {
                 setIsPlaying(false);
             }
-        }
-    };
+        }, 1000 / speed);
 
-    // Use effect for auto-stepping would go here in a real implementation
-    // For now, manual stepping only
+        return () => clearInterval(interval);
+    }, [isPlaying, backtestStatus?.loaded, backtestStatus?.current_index, backtestStatus?.total_bars, speed, stepMutation.isPending]);
 
+    // Keyboard shortcuts
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            // Ignore if typing in an input
+            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+            
+            const isLoaded = backtestStatus?.loaded;
+            if (!isLoaded) return;
+
+            switch (e.code) {
+                case "Space":
+                    e.preventDefault();
+                    if (isPlaying) handlePause();
+                    else handlePlay();
+                    break;
+                case "ArrowRight":
+                    e.preventDefault();
+                    if (!stepMutation.isPending) {
+                        stepMutation.mutate(e.shiftKey ? 5 : 1);
+                    }
+                    break;
+                case "ArrowLeft":
+                    e.preventDefault();
+                    if (!stepBackMutation.isPending) {
+                        stepBackMutation.mutate(e.shiftKey ? 5 : 1);
+                    }
+                    break;
+                case "Home":
+                    e.preventDefault();
+                    resetMutation.mutate();
+                    break;
+                case "Digit1":
+                    setSpeed(1);
+                    break;
+                case "Digit2":
+                    setSpeed(2);
+                    break;
+                case "Digit5":
+                    setSpeed(5);
+                    break;
+                case "Digit0":
+                    setSpeed(10);
+                    break;
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [isPlaying, backtestStatus?.loaded, stepMutation.isPending, stepBackMutation.isPending]);
+
+    // Derived state
     const isLoaded = backtestStatus?.loaded || false;
     const progress = backtestStatus?.progress || 0;
+    const chartData = currentSnapshot?.timeframe_bars || {};
+
+    // Price levels for chart
+    const priceLevels = analysisResult?.setup?.entry_price ? [
+        { price: analysisResult.setup.entry_price, label: "Entry", type: "entry" as const },
+        ...(analysisResult.setup.stop_loss ? [{ price: analysisResult.setup.stop_loss, label: "SL", type: "stop" as const }] : []),
+        ...(analysisResult.setup.take_profit?.[0] ? [{ price: analysisResult.setup.take_profit[0], label: "TP", type: "target" as const }] : []),
+    ] : [];
+
+    // Get current timestamp from snapshot
+    const currentTimestamp = currentSnapshot?.timeframe_bars?.["1H"]?.slice(-1)?.[0]?.timestamp;
 
     return (
-        <div className="flex flex-col h-full w-full overflow-hidden">
+        <div className="flex flex-col h-screen w-full overflow-hidden bg-slate-950">
+            {/* Header */}
             <Header
                 mode={health?.mode || "ANALYSIS_ONLY"}
                 agentAvailable={health?.agent_available || false}
             />
 
-            <ScrollArea className="flex-1">
-                <div className="p-4 min-w-0">
-                    {/* Header */}
-                    <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+            {/* Top Stats Bar */}
+            <BacktestStatsBar
+                symbol={config.symbol}
+                fromDate={config.fromDate}
+                toDate={config.toDate}
+                dataSource={dataSource}
+                isLoaded={isLoaded}
+                isLoading={loadMutation.isPending}
+                totalBars={backtestStatus?.total_bars || 0}
+                onConfigClick={() => setConfigOpen(true)}
+                onLoadClick={() => loadMutation.mutate()}
+            />
+
+            {/* Main Content Area */}
+            <div className="flex-1 flex overflow-hidden">
+                {/* Chart Area (Left - 70%) */}
+                <div className="flex-1 flex flex-col p-3 overflow-hidden">
+                    {/* Back button and title */}
+                    <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2">
                             <Link href="/">
-                                <Button variant="ghost" size="icon" className="h-8 w-8">
+                                <Button variant="ghost" size="icon" className="h-7 w-7">
                                     <ArrowLeft className="w-4 h-4" />
                                 </Button>
                             </Link>
-                            <h2 className="text-lg font-semibold text-slate-100">Backtest Mode</h2>
-                            <Badge variant="outline" className="bg-yellow-500/20 text-yellow-400 border-yellow-500/50">
-                                <Database className="w-3 h-3 mr-1" />
-                                Simulation
+                            <h1 className="text-sm font-semibold text-slate-100">Backtest God View</h1>
+                            <Badge variant="outline" className="bg-yellow-500/20 text-yellow-400 border-yellow-500/50 text-xs">
+                                SIMULATION
                             </Badge>
                         </div>
+                        
+                        {/* Keyboard shortcuts hint */}
+                        <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Button variant="ghost" size="sm" className="h-7 text-xs text-slate-500">
+                                        <Keyboard className="w-3.5 h-3.5 mr-1" />
+                                        Shortcuts
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="bottom" className="bg-slate-900 border-slate-700 text-xs">
+                                    <div className="space-y-1">
+                                        <div><kbd className="bg-slate-800 px-1 rounded">Space</kbd> Play/Pause</div>
+                                        <div><kbd className="bg-slate-800 px-1 rounded">→</kbd> Step forward</div>
+                                        <div><kbd className="bg-slate-800 px-1 rounded">←</kbd> Step back</div>
+                                        <div><kbd className="bg-slate-800 px-1 rounded">Shift+→/←</kbd> Skip 5 bars</div>
+                                        <div><kbd className="bg-slate-800 px-1 rounded">Home</kbd> Reset</div>
+                                        <div><kbd className="bg-slate-800 px-1 rounded">1/2/5/0</kbd> Speed presets</div>
+                                    </div>
+                                </TooltipContent>
+                            </Tooltip>
+                        </TooltipProvider>
                     </div>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                        {/* Left: Configuration Panel */}
-                        <Card className="bg-slate-900 border-slate-800">
-                            <CardHeader className="pb-3">
-                                <CardTitle className="text-base flex items-center gap-2">
-                                    <Calendar className="w-4 h-4 text-blue-400" />
-                                    Backtest Configuration
-                                </CardTitle>
-                                <CardDescription className="text-sm">
-                                    Select symbol and date range for backtesting
-                                </CardDescription>
-                            </CardHeader>
-                            <CardContent className="space-y-4">
-                                {/* Symbol Selection */}
-                                <div className="space-y-2">
-                                    <Label className="text-sm text-slate-300">Symbol</Label>
-                                    <TradingPairSelector
-                                        value={selectedPair}
-                                        onChange={setSelectedPair}
-                                        className="w-full"
-                                    />
-                                </div>
-
-                                {/* Date Range */}
-                                <div className="grid grid-cols-2 gap-3">
-                                    <div className="space-y-2">
-                                        <Label className="text-xs text-slate-400">From Date</Label>
-                                        <Input
-                                            type="date"
-                                            value={fromDate}
-                                            onChange={(e) => setFromDate(e.target.value)}
-                                            className="bg-slate-800 border-slate-700"
-                                        />
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label className="text-xs text-slate-400">To Date</Label>
-                                        <Input
-                                            type="date"
-                                            value={toDate}
-                                            onChange={(e) => setToDate(e.target.value)}
-                                            className="bg-slate-800 border-slate-700"
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Load Button */}
-                                <Button
-                                    onClick={() => loadMutation.mutate()}
-                                    disabled={loadMutation.isPending}
-                                    className="w-full bg-blue-600 hover:bg-blue-700"
-                                >
-                                    {loadMutation.isPending ? (
-                                        <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Loading...</>
-                                    ) : (
-                                        <><Database className="w-4 h-4 mr-2" />Load Data</>
-                                    )}
-                                </Button>
-
-                                <Separator className="bg-slate-800" />
-
-                                {/* Speed Control */}
-                                <div className="space-y-2">
-                                    <Label className="text-sm text-slate-300">Playback Speed</Label>
-                                    <Select
-                                        value={String(speed)}
-                                        onValueChange={(v) => setSpeed(parseInt(v))}
-                                    >
-                                        <SelectTrigger className="bg-slate-800 border-slate-700">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            {speedOptions.map((opt) => (
-                                                <SelectItem key={opt.value} value={String(opt.value)}>
-                                                    {opt.label}
-                                                </SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                            </CardContent>
-                        </Card>
-
-                        {/* Middle: Playback Controls & Progress */}
-                        <Card className="bg-slate-900 border-slate-800">
-                            <CardHeader className="pb-3">
-                                <CardTitle className="text-base">Playback Controls</CardTitle>
-                            </CardHeader>
-                            <CardContent className="space-y-4">
-                                {/* Progress Bar */}
-                                <div className="space-y-2">
-                                    <div className="flex justify-between text-xs text-slate-400">
-                                        <span>Progress</span>
-                                        <span>{progress.toFixed(1)}%</span>
-                                    </div>
-                                    <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
-                                        <div
-                                            className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 transition-all duration-300"
-                                            style={{ width: `${progress}%` }}
-                                        />
-                                    </div>
-                                    <div className="flex justify-between text-xs text-slate-500">
-                                        <span>Bar {backtestStatus?.current_index || 0}</span>
-                                        <span>of {backtestStatus?.total_bars || 0}</span>
-                                    </div>
-                                </div>
-
-                                {/* Control Buttons */}
-                                <div className="flex items-center justify-center gap-2">
-                                    <Button
-                                        variant="outline"
-                                        size="icon"
-                                        onClick={() => resetMutation.mutate()}
-                                        disabled={!isLoaded || resetMutation.isPending}
-                                        className="border-slate-700"
-                                    >
-                                        <RotateCcw className="w-4 h-4" />
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        size="icon"
-                                        onClick={() => stepBackMutation.mutate(1)}
-                                        disabled={!isLoaded || stepBackMutation.isPending}
-                                        className="border-slate-700"
-                                    >
-                                        <SkipBack className="w-4 h-4" />
-                                    </Button>
-                                    <Button
-                                        size="lg"
-                                        onClick={isPlaying ? handlePause : handlePlay}
-                                        disabled={!isLoaded}
-                                        className={isPlaying ? "bg-yellow-600 hover:bg-yellow-700" : "bg-emerald-600 hover:bg-emerald-700"}
-                                    >
-                                        {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        size="icon"
-                                        onClick={() => stepMutation.mutate(1)}
-                                        disabled={!isLoaded || stepMutation.isPending}
-                                        className="border-slate-700"
-                                    >
-                                        <SkipForward className="w-4 h-4" />
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        size="icon"
-                                        onClick={() => stepMutation.mutate(5)}
-                                        disabled={!isLoaded || stepMutation.isPending}
-                                        className="border-slate-700"
-                                    >
-                                        <ChevronRight className="w-4 h-4" />
-                                        <ChevronRight className="w-4 h-4 -ml-2" />
-                                    </Button>
-                                </div>
-
-                                {/* Status */}
-                                <div className="text-center">
-                                    {!isLoaded ? (
-                                        <p className="text-sm text-slate-500">Load data to begin backtesting</p>
-                                    ) : (
-                                        <p className="text-sm text-slate-400">
-                                            {backtestStatus?.symbol} | {backtestStatus?.from_date?.split('T')[0]} to {backtestStatus?.to_date?.split('T')[0]}
-                                        </p>
-                                    )}
-                                </div>
-                            </CardContent>
-                        </Card>
-
-                        {/* Right: Analysis Results */}
-                        <Card className="bg-slate-900 border-slate-800">
-                            <CardHeader className="pb-3">
-                                <CardTitle className="text-base">Analysis Results</CardTitle>
-                            </CardHeader>
-                            <CardContent>
-                                {analysisResult ? (
-                                    <div className="space-y-3">
-                                        {/* Status */}
-                                        <div className="flex items-center gap-2">
-                                            <Badge
-                                                className={
-                                                    analysisResult.status === "TRADE_NOW"
-                                                        ? "bg-emerald-500/20 text-emerald-400"
-                                                        : analysisResult.status === "WAIT"
-                                                            ? "bg-yellow-500/20 text-yellow-400"
-                                                            : "bg-slate-500/20 text-slate-400"
-                                                }
-                                            >
-                                                {analysisResult.status}
-                                            </Badge>
-                                            <span className="text-sm text-slate-400">{analysisResult.reason_short}</span>
-                                        </div>
-
-                                        {/* Bias */}
-                                        <div className="grid grid-cols-2 gap-2 text-sm">
-                                            <div className="bg-slate-800 rounded p-2">
-                                                <div className="text-xs text-slate-500">HTF Bias</div>
-                                                <div className={
-                                                    analysisResult.htf_bias.value === "BULLISH"
-                                                        ? "text-emerald-400 font-medium"
-                                                        : analysisResult.htf_bias.value === "BEARISH"
-                                                            ? "text-red-400 font-medium"
-                                                            : "text-slate-400"
-                                                }>
-                                                    {analysisResult.htf_bias.value}
-                                                </div>
-                                            </div>
-                                            <div className="bg-slate-800 rounded p-2">
-                                                <div className="text-xs text-slate-500">Confidence</div>
-                                                <div className="text-slate-100 font-medium">{analysisResult.confidence}%</div>
-                                            </div>
-                                        </div>
-
-                                        {/* Setup */}
-                                        {analysisResult.setup.name !== "NO_SETUP" && (
-                                            <div className="bg-slate-800 rounded p-2">
-                                                <div className="text-xs text-slate-500">Setup</div>
-                                                <div className="text-slate-100">{analysisResult.setup.name}</div>
-                                                <div className="text-xs text-slate-400 mt-1">
-                                                    Confluence: {analysisResult.setup.confluence_score}
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {/* Explanation */}
-                                        <div className="text-xs text-slate-400 bg-slate-800/50 rounded p-2">
-                                            {analysisResult.explanation}
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <div className="text-center text-slate-500 py-8">
-                                        <p className="text-sm">Step through data to see analysis</p>
-                                    </div>
-                                )}
-                            </CardContent>
-                        </Card>
-                    </div>
+                    {/* Chart */}
+                    <CandlestickChart
+                        data={chartData}
+                        selectedTimeframe={selectedTimeframe}
+                        onTimeframeChange={setSelectedTimeframe}
+                        priceLevels={priceLevels}
+                        symbol={config.symbol}
+                        className="flex-1"
+                    />
                 </div>
-            </ScrollArea>
+
+                {/* Analysis Panel (Right - 30%) */}
+                <div className="w-[320px] flex-shrink-0 border-l border-slate-800 bg-slate-950">
+                    <BacktestAnalysisPanel 
+                        analysis={analysisResult} 
+                        className="h-full"
+                    />
+                </div>
+            </div>
+
+            {/* Bottom Control Bar */}
+            <BacktestControlBar
+                isLoaded={isLoaded}
+                isPlaying={isPlaying}
+                currentIndex={backtestStatus?.current_index || 0}
+                totalBars={backtestStatus?.total_bars || 0}
+                progress={progress}
+                speed={speed}
+                currentTimestamp={currentTimestamp}
+                onPlay={handlePlay}
+                onPause={handlePause}
+                onStepForward={(bars) => stepMutation.mutate(bars)}
+                onStepBack={(bars) => stepBackMutation.mutate(bars)}
+                onReset={() => resetMutation.mutate()}
+                onJumpTo={(index) => jumpMutation.mutate(index)}
+                onSpeedChange={setSpeed}
+                isSteppingForward={stepMutation.isPending}
+                isSteppingBack={stepBackMutation.isPending}
+                isResetting={resetMutation.isPending}
+            />
+
+            {/* Config Sheet */}
+            <BacktestConfigSheet
+                open={configOpen}
+                onOpenChange={setConfigOpen}
+                config={config}
+                onConfigChange={setConfig}
+                onApply={() => loadMutation.mutate()}
+                mt5Symbols={mt5SymbolsData?.symbols}
+            />
         </div>
     );
 }

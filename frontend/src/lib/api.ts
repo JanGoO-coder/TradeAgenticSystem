@@ -1,5 +1,31 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+// MT5 Connection Types
+export interface MT5TerminalInfo {
+    connected: boolean;
+    trade_allowed: boolean;
+    company: string;
+    name: string;
+    path: string;
+}
+
+export interface MT5Status {
+    available: boolean;
+    connected: boolean;
+    terminal_info: MT5TerminalInfo | null;
+}
+
+export interface MT5SymbolsResponse {
+    symbols: string[];
+    count: number;
+}
+
+export interface MT5ConnectResponse {
+    connected: boolean;
+    message: string;
+    terminal_info: MT5TerminalInfo | null;
+}
+
 export interface SessionInfo {
     session: string;
     kill_zone_active: boolean;
@@ -262,5 +288,36 @@ export async function updateDataConfig(config: DataConfig): Promise<DataConfig> 
 export async function getDataModes(): Promise<{ modes: DataMode[] }> {
     const res = await fetch(`${API_BASE_URL}/api/v1/data/modes`);
     if (!res.ok) throw new Error('Failed to fetch data modes');
+    return res.json();
+}
+
+// MT5 API Functions
+export async function getMT5Status(): Promise<MT5Status> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/market-data/status`);
+    if (!res.ok) throw new Error('Failed to fetch MT5 status');
+    return res.json();
+}
+
+export async function connectMT5(): Promise<MT5ConnectResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/market-data/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+    });
+    if (!res.ok) throw new Error('Failed to connect to MT5');
+    return res.json();
+}
+
+export async function disconnectMT5(): Promise<{ connected: boolean; message: string }> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/market-data/disconnect`, {
+        method: 'POST',
+    });
+    if (!res.ok) throw new Error('Failed to disconnect from MT5');
+    return res.json();
+}
+
+export async function getMT5Symbols(): Promise<MT5SymbolsResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/market-data/symbols`);
+    if (!res.ok) throw new Error('Failed to fetch MT5 symbols');
     return res.json();
 }
