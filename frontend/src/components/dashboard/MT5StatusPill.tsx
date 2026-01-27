@@ -18,10 +18,10 @@ interface MT5StatusPillProps {
     className?: string;
 }
 
-export function MT5StatusPill({ 
-    onStatusChange, 
+export function MT5StatusPill({
+    onStatusChange,
     showConnectButton = true,
-    className = "" 
+    className = ""
 }: MT5StatusPillProps) {
     const queryClient = useQueryClient();
 
@@ -104,8 +104,8 @@ export function MT5StatusPill({
             <TooltipProvider>
                 <Tooltip>
                     <TooltipTrigger asChild>
-                        <Badge 
-                            variant="outline" 
+                        <Badge
+                            variant="outline"
                             className={`${getStatusStyle()} cursor-default transition-all duration-300`}
                         >
                             <span className="flex items-center gap-1.5">

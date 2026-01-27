@@ -1,6 +1,7 @@
 """Data models for the ICT Trading System."""
 from typing import List, Optional, Literal
-from pydantic import BaseModel, Field
+from decimal import Decimal
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 from enum import Enum
 
@@ -42,21 +43,25 @@ class LTFAlignment(BaseModel):
 class TradeSetup(BaseModel):
     name: str
     type: str
-    entry_price: Optional[float] = None
+    entry_price: Optional[Decimal] = None
     entry_type: Optional[EntryType] = None
-    stop_loss: Optional[float] = None
-    take_profit: Optional[List[float]] = None
-    invalidation_point: Optional[float] = None
+    stop_loss: Optional[Decimal] = None
+    take_profit: Optional[List[Decimal]] = None
+    invalidation_point: Optional[Decimal] = None
     is_counter_trend: bool = False
     confluence_score: int = Field(ge=0, le=10)
     rule_refs: List[str]
 
+    model_config = ConfigDict(json_encoders={Decimal: str})
+
 
 class RiskParameters(BaseModel):
-    account_balance: float
-    risk_pct: float
-    position_size: float
-    rr: Optional[float] = None
+    account_balance: Decimal
+    risk_pct: Decimal
+    position_size: Decimal
+    rr: Optional[Decimal] = None
+
+    model_config = ConfigDict(json_encoders={Decimal: str})
 
 
 class ExecutionChecklist(BaseModel):
@@ -88,11 +93,13 @@ class TradeSetupResponse(BaseModel):
 class OHLCV(BaseModel):
     """Single candle data."""
     timestamp: datetime
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: Optional[float] = None
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Optional[Decimal] = None
+
+    model_config = ConfigDict(json_encoders={Decimal: str})
 
 
 class EconomicEvent(BaseModel):
@@ -108,18 +115,23 @@ class MarketSnapshot(BaseModel):
     symbol: str
     timestamp: str
     timeframe_bars: dict  # {"1H": [OHLCV], "15M": [OHLCV], "5M": [OHLCV]}
-    account_balance: float
-    risk_pct: float = 1.0
+    account_balance: Decimal
+    risk_pct: Decimal = Decimal("1.0")
     session: Optional[Literal["London", "NY", "Asia"]] = None
     economic_calendar: List[EconomicEvent] = []
     user_max_trades_per_session: Optional[int] = None
+    # Backtest-specific fields
+    backtest_mode: bool = False
+    auto_execute_enabled: bool = False
+
+    model_config = ConfigDict(json_encoders={Decimal: str})
 
 
 class GraphState(BaseModel):
     """State object passed between LangGraph nodes."""
     # Input data
     snapshot: MarketSnapshot
-    
+
     # Node outputs
     htf_bias: Optional[HTFBias] = None
     gatekeeper_status: Optional[Literal["GO", "WAIT"]] = None
@@ -128,10 +140,15 @@ class GraphState(BaseModel):
     detected_setup: Optional[TradeSetup] = None
     risk_params: Optional[RiskParameters] = None
     checklist: Optional[ExecutionChecklist] = None
-    
+
     # Tracking
     nodes_triggered: List[str] = []
     final_status: Optional[TradeStatus] = None
     reason_short: str = ""
     explanation: str = ""
     confidence: float = 0.0
+
+    # Auto-execution result
+    trade_executed: Optional[dict] = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)

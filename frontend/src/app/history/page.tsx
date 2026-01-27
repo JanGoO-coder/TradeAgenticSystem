@@ -5,7 +5,6 @@ import { Header } from "@/components/layout/Header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { getHealth, getDecisions, getPerformanceMetrics, getSimulatedTrades, DecisionRecord, PerformanceMetrics, SimulatedTrade } from "@/lib/api";
 import { History as HistoryIcon, TrendingUp, TrendingDown, XCircle, Clock, BarChart3 } from "lucide-react";
 
@@ -132,7 +131,7 @@ export default function HistoryPage() {
     return (
         <div className="flex flex-col h-full w-full overflow-hidden">
             <Header mode={health?.mode || "ANALYSIS_ONLY"} agentAvailable={health?.agent_available || false} />
-            <ScrollArea className="flex-1">
+            <div className="flex-1 overflow-y-auto">
                 <div className="p-4 min-w-0">
                     <div className="flex items-center gap-3 mb-4">
                         <HistoryIcon className="w-5 h-5 text-slate-400" />
@@ -148,7 +147,7 @@ export default function HistoryPage() {
                         <TabsContent value="trades"><TradesList trades={trades} /></TabsContent>
                     </Tabs>
                 </div>
-            </ScrollArea>
+            </div>
         </div>
     );
 }

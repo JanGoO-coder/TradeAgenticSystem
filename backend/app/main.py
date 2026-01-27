@@ -3,15 +3,32 @@ ICT Trading Platform - FastAPI Backend Application
 
 Main entry point for the API server.
 """
-from fastapi import FastAPI
+import os
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.api.v1 import analysis, session, health, chat, execution, data, market_data
+from app.core.exceptions import AgentReliabilityException
+from app.api.v1 import analysis, session, health, chat, execution, data, market_data, rules
 from app.api.v1.websocket import router as websocket_router
+from app.api.v1.strategies import router as strategies_router, debug_router
 
 # Get settings
 settings = get_settings()
+
+# Create data directories on startup
+def create_data_directories():
+    """Ensure all data directories exist."""
+    directories = [
+        settings.data_dir,
+        settings.tick_cache_dir,
+        settings.sessions_dir,
+    ]
+    for dir_path in directories:
+        os.makedirs(dir_path, exist_ok=True)
+
+create_data_directories()
 
 # Create FastAPI app
 app = FastAPI(
@@ -30,6 +47,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(AgentReliabilityException)
+async def agent_reliability_exception_handler(request: Request, exc: AgentReliabilityException):
+    """Handle Agent Reliability Exceptions with structured JSON."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error_code": exc.error_code, 
+            "message": exc.detail,
+            "success": False
+        },
+    )
 
 # Include routers
 app.include_router(
@@ -65,6 +94,22 @@ app.include_router(
     market_data.router,
     prefix=settings.api_v1_prefix
 )
+# Rules configuration router (hot-reload support)
+app.include_router(
+    rules.router,
+    prefix=settings.api_v1_prefix
+)
+# Strategy management router (Phase 5)
+app.include_router(
+    strategies_router,
+    prefix=settings.api_v1_prefix
+)
+# Debug endpoints router (Phase 5)
+app.include_router(
+    debug_router,
+    prefix=settings.api_v1_prefix
+)
+
 
 
 @app.get("/")

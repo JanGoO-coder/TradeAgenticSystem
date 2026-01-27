@@ -3,7 +3,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { TradeSetupResponse } from "@/lib/api";
 import {
     Target,
@@ -163,7 +162,7 @@ export function TradeSetupViewer({ setup, onClose }: TradeSetupViewerProps) {
                     </TabsContent>
 
                     <TabsContent value="rules" className="mt-4">
-                        <ScrollArea className="h-[200px]">
+                        <div className="h-[200px] overflow-y-auto">
                             <div className="space-y-2">
                                 {setup.setup.rule_refs.map((rule) => (
                                     <div key={rule} className="flex items-center gap-2 p-2 bg-slate-800/50 rounded">
@@ -173,7 +172,7 @@ export function TradeSetupViewer({ setup, onClose }: TradeSetupViewerProps) {
                                     </div>
                                 ))}
                             </div>
-                        </ScrollArea>
+                        </div>
                     </TabsContent>
                 </Tabs>
             </CardContent>

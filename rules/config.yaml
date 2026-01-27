@@ -1,0 +1,97 @@
+# ICT Trading Rules Configuration
+# Version: 1.0
+# This file can be hot-reloaded at runtime via POST /api/v1/rules/reload
+
+version: "1.0"
+ruleset_name: "ICT Core Rules"
+
+# =============================================================================
+# Section 1: Timeframe Configuration (Rule 1.1, 1.2)
+# =============================================================================
+timeframes:
+  bias_timeframe: "1H"           # HTF for directional bias
+  entry_timeframes: ["15M", "5M"] # LTF for entry patterns
+  min_candles_for_structure: 10  # Minimum candles for structure analysis
+  swing_lookback: 2              # Candles on each side for swing detection
+
+# =============================================================================
+# Section 8: Session & Time Rules (Rule 8.1)
+# =============================================================================
+killzones:
+  london:
+    enabled: true
+    start_est: "02:00"
+    end_est: "05:00"
+  new_york:
+    enabled: true
+    start_est: "07:00"
+    end_est: "10:00"
+  asia:
+    enabled: false
+    start_est: "20:00"
+    end_est: "00:00"
+
+# Silverbullet Windows (Rule 6.6)
+silverbullet:
+  enabled: true
+  windows:
+    - start_est: "10:00"
+      end_est: "11:00"
+    - start_est: "14:00"
+      end_est: "15:00"
+
+# =============================================================================
+# Section 7: Risk Management (Rule 7.1, 7.2)
+# =============================================================================
+risk:
+  min_rr: 2.0                    # Minimum Risk:Reward ratio
+  default_risk_pct: 1.0          # Default risk per trade (%)
+  max_risk_pct: 2.0              # Maximum allowed risk (%)
+  pip_buffer: 0.0005             # SL offset beyond swing/structure
+  pip_value_per_lot: 10.0        # Standard pip value for majors
+
+# =============================================================================
+# Section 2.2: Displacement Detection
+# =============================================================================
+displacement:
+  atr_multiplier: 2.0            # Body > ATR * multiplier = displacement
+  atr_period: 14                 # Period for ATR calculation
+
+# =============================================================================
+# Section 8.4: News Rules
+# =============================================================================
+news:
+  high_impact_window_minutes: 60  # Minutes before high-impact news to block
+  high_impact_action: "BLOCK"     # BLOCK or CAUTION
+  medium_impact_action: "CAUTION" # CAUTION or ALLOW
+  avoid_bank_holidays: true
+
+# =============================================================================
+# Section 6: Entry Models (enable/disable)
+# =============================================================================
+entry_models:
+  ote_enabled: true              # Rule 6.1 - Optimal Trade Entry
+  fvg_entry_enabled: true        # Rule 6.2 - Fair Value Gap Entry
+  ict_2022_enabled: true         # Rule 6.5 - ICT 2022 Model
+  silverbullet_enabled: true     # Rule 6.6 - Silverbullet (time-based)
+  turtle_soup_enabled: false     # Rule 6.7 - Turtle Soup (liquidity grab)
+
+# =============================================================================
+# Section 9: Invalidation Rules
+# =============================================================================
+invalidation:
+  counter_trend_requires_htf_mss: true  # Rule 1.2.2
+  max_trades_per_session: 2             # Rule 9.3 (0 = unlimited)
+
+# =============================================================================
+# Confluence Scoring Weights
+# =============================================================================
+confluence_weights:
+  htf_bias_exists: 2
+  ltf_aligned: 1
+  fvg_or_ob_present: 2
+  liquidity_sweep: 2
+  pd_favorable: 1
+  session_ok: 1
+  news_ok: 1
+  min_score_for_trade: 6         # Minimum confluence score to take trade

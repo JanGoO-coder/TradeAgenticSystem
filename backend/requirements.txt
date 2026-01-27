@@ -6,3 +6,5 @@ python-dotenv>=1.0.0
 langgraph>=0.0.40
 langchain>=0.1.0
 MetaTrader5>=5.0.45
+google-genai>=1.0.0
+
