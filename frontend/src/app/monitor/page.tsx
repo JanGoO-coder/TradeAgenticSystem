@@ -12,7 +12,6 @@ import { ChecklistPanel } from "@/components/dashboard/ChecklistPanel";
 import { TradingPairSelector } from "@/components/dashboard/TradingPairSelector";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { getHealth, getSession, analyzeMarket, getDataConfig, TradeSetupResponse, DataConfig } from "@/lib/api";
 import { Play, Loader2, ArrowLeft, Radio, Circle } from "lucide-react";
 import Link from "next/link";
@@ -128,7 +127,7 @@ export default function MonitorPage() {
         <div className="flex flex-col h-full w-full overflow-hidden">
             <Header mode={health?.mode || "ANALYSIS_ONLY"} agentAvailable={health?.agent_available || false} />
 
-            <ScrollArea className="flex-1">
+            <div className="flex-1 overflow-y-auto">
                 <div className="p-4 min-w-0">
                     {/* Header */}
                     <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -192,7 +191,7 @@ export default function MonitorPage() {
                         </div>
                     </div>
                 </div>
-            </ScrollArea>
+            </div>
         </div>
     );
 }

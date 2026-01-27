@@ -31,15 +31,15 @@ interface CandlestickChartProps {
 }
 
 // Simple candlestick visualization using divs
-function Candle({ 
-    candle, 
-    minPrice, 
-    maxPrice, 
-    width 
-}: { 
-    candle: OHLCV; 
-    minPrice: number; 
-    maxPrice: number; 
+function Candle({
+    candle,
+    minPrice,
+    maxPrice,
+    width
+}: {
+    candle: OHLCV;
+    minPrice: number;
+    maxPrice: number;
     width: number;
 }) {
     const range = maxPrice - minPrice;
@@ -48,7 +48,7 @@ function Candle({
     const isBullish = candle.close >= candle.open;
     const bodyTop = Math.max(candle.open, candle.close);
     const bodyBottom = Math.min(candle.open, candle.close);
-    
+
     const highPercent = ((maxPrice - candle.high) / range) * 100;
     const lowPercent = ((maxPrice - candle.low) / range) * 100;
     const bodyTopPercent = ((maxPrice - bodyTop) / range) * 100;
@@ -58,18 +58,18 @@ function Candle({
     return (
         <div className="relative h-full flex flex-col items-center" style={{ width: `${width}px` }}>
             {/* Wick */}
-            <div 
+            <div
                 className={`absolute w-px ${isBullish ? 'bg-emerald-500' : 'bg-red-500'}`}
-                style={{ 
-                    top: `${highPercent}%`, 
-                    height: `${lowPercent - highPercent}%` 
+                style={{
+                    top: `${highPercent}%`,
+                    height: `${lowPercent - highPercent}%`
                 }}
             />
             {/* Body */}
-            <div 
+            <div
                 className={`absolute rounded-sm ${isBullish ? 'bg-emerald-500' : 'bg-red-500'}`}
-                style={{ 
-                    top: `${bodyTopPercent}%`, 
+                style={{
+                    top: `${bodyTopPercent}%`,
                     height: `${Math.max(bodyHeight, 1)}%`,
                     width: `${Math.max(width - 2, 2)}px`
                 }}
@@ -78,28 +78,35 @@ function Candle({
     );
 }
 
-// Price level line
-function PriceLevelLine({ 
-    level, 
-    minPrice, 
-    maxPrice 
-}: { 
-    level: PriceLevel; 
-    minPrice: number; 
-    maxPrice: number; 
+// Price level line - always renders if within expanded range (includes price levels)
+function PriceLevelLine({
+    level,
+    minPrice,
+    maxPrice
+}: {
+    level: PriceLevel;
+    minPrice: number;
+    maxPrice: number;
 }) {
     const range = maxPrice - minPrice;
-    if (range === 0 || level.price < minPrice || level.price > maxPrice) return null;
-    
+    if (range === 0) return null;
+
+    // Calculate position - clamp between 0% and 100% to keep label visible at edges
     const topPercent = ((maxPrice - level.price) / range) * 100;
-    
+    const clampedTop = Math.max(0, Math.min(100, topPercent));
+
+    // Determine if level is outside visible range (for visual indication)
+    const isAboveRange = level.price > maxPrice;
+    const isBelowRange = level.price < minPrice;
+    const isOutOfRange = isAboveRange || isBelowRange;
+
     const colors = {
         entry: "border-blue-500 bg-blue-500/20 text-blue-400",
         stop: "border-red-500 bg-red-500/20 text-red-400",
         target: "border-emerald-500 bg-emerald-500/20 text-emerald-400",
         invalidation: "border-orange-500 bg-orange-500/20 text-orange-400",
     };
-    
+
     const lineColors = {
         entry: "border-blue-500",
         stop: "border-red-500",
@@ -108,20 +115,22 @@ function PriceLevelLine({
     };
 
     return (
-        <div 
-            className={`absolute left-0 right-0 border-t border-dashed ${lineColors[level.type]} z-10`}
-            style={{ top: `${topPercent}%` }}
+        <div
+            className={`absolute left-0 right-0 border-t border-dashed ${lineColors[level.type]} z-10 ${isOutOfRange ? 'opacity-60' : ''}`}
+            style={{ top: `${clampedTop}%` }}
         >
             <span className={`absolute right-0 text-[10px] px-1 rounded ${colors[level.type]} -translate-y-1/2`}>
                 {level.label}: {level.price.toFixed(5)}
+                {isAboveRange && ' ↑'}
+                {isBelowRange && ' ↓'}
             </span>
         </div>
     );
 }
 
-export function CandlestickChart({ 
-    data, 
-    selectedTimeframe, 
+export function CandlestickChart({
+    data,
+    selectedTimeframe,
     onTimeframeChange,
     priceLevels = [],
     symbol,
@@ -129,36 +138,47 @@ export function CandlestickChart({
 }: CandlestickChartProps) {
     const timeframes = Object.keys(data).filter(tf => data[tf]?.length > 0);
     const candles = data[selectedTimeframe] || [];
-    
-    // Calculate price range
+
+    // Calculate price range - ALWAYS include price levels for consistent display across timeframes
     const { minPrice, maxPrice, lastCandle, priceChange } = useMemo(() => {
         if (candles.length === 0) {
+            // If no candles but we have price levels, use those
+            if (priceLevels.length > 0) {
+                let min = Math.min(...priceLevels.map(l => l.price));
+                let max = Math.max(...priceLevels.map(l => l.price));
+                const padding = (max - min) * 0.1 || 0.001;
+                return { minPrice: min - padding, maxPrice: max + padding, lastCandle: null, priceChange: 0 };
+            }
             return { minPrice: 0, maxPrice: 0, lastCandle: null, priceChange: 0 };
         }
-        
+
+        // Start with candle range
         let min = Infinity;
         let max = -Infinity;
-        
+
         candles.forEach(c => {
             if (c.low < min) min = c.low;
             if (c.high > max) max = c.high;
         });
-        
-        // Include price levels in range
-        priceLevels.forEach(level => {
-            if (level.price < min) min = level.price;
-            if (level.price > max) max = level.price;
-        });
-        
-        // Add 5% padding
-        const padding = (max - min) * 0.05;
+
+        // ALWAYS include price levels in range to ensure they're visible
+        if (priceLevels.length > 0) {
+            priceLevels.forEach(level => {
+                // Expand range to fit all price levels
+                if (level.price < min) min = level.price;
+                if (level.price > max) max = level.price;
+            });
+        }
+
+        // Add 8% padding for better visibility (increased from 5%)
+        const padding = (max - min) * 0.08;
         min -= padding;
         max += padding;
-        
+
         const last = candles[candles.length - 1];
         const first = candles[0];
         const change = first ? ((last.close - first.open) / first.open) * 100 : 0;
-        
+
         return { minPrice: min, maxPrice: max, lastCandle: last, priceChange: change };
     }, [candles, priceLevels]);
 
@@ -195,10 +215,10 @@ export function CandlestickChart({
                                 <span className="text-lg font-mono text-slate-100">
                                     {lastCandle.close.toFixed(5)}
                                 </span>
-                                <Badge 
+                                <Badge
                                     variant="outline"
-                                    className={priceChange >= 0 
-                                        ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/50" 
+                                    className={priceChange >= 0
+                                        ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/50"
                                         : "bg-red-500/20 text-red-400 border-red-500/50"
                                     }
                                 >
@@ -211,8 +231,8 @@ export function CandlestickChart({
                     <Tabs value={selectedTimeframe} onValueChange={onTimeframeChange}>
                         <TabsList className="bg-slate-800 h-7">
                             {timeframes.map(tf => (
-                                <TabsTrigger 
-                                    key={tf} 
+                                <TabsTrigger
+                                    key={tf}
                                     value={tf}
                                     className="text-xs px-2 h-5 data-[state=active]:bg-slate-700"
                                 >
@@ -231,23 +251,23 @@ export function CandlestickChart({
                         <span>{((maxPrice + minPrice) / 2).toFixed(5)}</span>
                         <span>{minPrice.toFixed(5)}</span>
                     </div>
-                    
+
                     {/* Chart area */}
                     <div className="absolute left-16 right-2 top-2 bottom-6 overflow-hidden">
                         {/* Price level lines */}
                         {priceLevels.map((level, i) => (
-                            <PriceLevelLine 
+                            <PriceLevelLine
                                 key={`${level.label}-${i}`}
                                 level={level}
                                 minPrice={minPrice}
                                 maxPrice={maxPrice}
                             />
                         ))}
-                        
+
                         {/* Candles */}
                         <div className="flex items-end justify-end h-full gap-px">
                             {visibleCandles.map((candle, i) => (
-                                <Candle 
+                                <Candle
                                     key={candle.timestamp}
                                     candle={candle}
                                     minPrice={minPrice}
@@ -257,11 +277,17 @@ export function CandlestickChart({
                             ))}
                         </div>
                     </div>
-                    
-                    {/* Time label */}
+
+                    {/* Time label - display in UTC to match control bar */}
                     {lastCandle && (
                         <div className="absolute bottom-1 right-2 text-[10px] text-slate-500">
-                            {new Date(lastCandle.timestamp).toLocaleString()}
+                            {new Date(lastCandle.timestamp).toLocaleString("en-US", {
+                                month: "short",
+                                day: "numeric",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                                timeZone: "UTC",
+                            })} UTC
                         </div>
                     )}
                 </div>

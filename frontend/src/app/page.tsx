@@ -9,11 +9,15 @@ import { SetupCard } from "@/components/dashboard/SetupCard";
 import { ChecklistPanel } from "@/components/dashboard/ChecklistPanel";
 import { ConfluenceMeter } from "@/components/dashboard/ConfluenceMeter";
 import { TradingPairSelector } from "@/components/dashboard/TradingPairSelector";
+import { StrategySelector } from "@/components/dashboard/StrategySelector";
+import { ReasoningPanel } from "@/components/dashboard/ReasoningPanel";
+import { MarketFactsPanel } from "@/components/dashboard/MarketFactsPanel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { getHealth, getSession, analyzeMarket, getDataConfig, TradeSetupResponse, DataConfig } from "@/lib/api";
+import { getHealth, getSession, analyzeMarket, getDataConfig, TradeSetupResponse, DataConfig, LLMDecision } from "@/lib/api";
 import { Play, Loader2 } from "lucide-react";
+import { StateMonitor } from "@/components/StateMonitor";
+import { LiveConsole } from "@/components/LiveConsole";
 
 // Generate sample market data that varies by symbol and uses config
 const createSampleMarketData = (symbol: string, config?: DataConfig) => {
@@ -70,11 +74,13 @@ const createSampleMarketData = (symbol: string, config?: DataConfig) => {
 export default function Dashboard() {
   const [selectedPair, setSelectedPair] = useState("EURUSD");
   const [currentSetup, setCurrentSetup] = useState<TradeSetupResponse | null>(null);
+  const [llmDecision, setLlmDecision] = useState<LLMDecision | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
 
   // Clear analysis when pair changes
   useEffect(() => {
     setCurrentSetup(null);
+    setLlmDecision(null);
     setAnalysisError(null);
   }, [selectedPair]);
 
@@ -100,6 +106,7 @@ export default function Dashboard() {
     mutationFn: () => analyzeMarket(createSampleMarketData(selectedPair, dataConfig)),
     onSuccess: (data) => {
       setCurrentSetup(data);
+      setLlmDecision(data.llm_decision || null);
       setAnalysisError(null);
     },
     onError: (error: Error) => {
@@ -114,7 +121,12 @@ export default function Dashboard() {
         agentAvailable={health?.agent_available || false}
       />
 
-      <ScrollArea className="flex-1">
+      {/* Agent State Monitor */}
+      <div className="p-4 pb-0">
+        <StateMonitor />
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
         <div className="p-4 min-w-0">
           {/* Quick Actions */}
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -125,6 +137,7 @@ export default function Dashboard() {
                 onChange={setSelectedPair}
                 className="w-[160px]"
               />
+              <StrategySelector className="w-[180px]" />
             </div>
             <Button
               onClick={() => analyzeMutation.mutate()}
@@ -174,9 +187,10 @@ export default function Dashboard() {
                 currentTimeEst={session?.current_time_est || "00:00"}
               />
               <BiasCard
-                bias={currentSetup?.htf_bias.value || "NEUTRAL"}
-                ruleRefs={currentSetup?.htf_bias.rule_refs || ["1.1"]}
+                bias={llmDecision?.bias || currentSetup?.htf_bias.value || "NEUTRAL"}
+                ruleRefs={currentSetup?.htf_bias.rule_refs || []}
                 timeframe="1H"
+                structureAssessment={llmDecision?.structure_assessment}
               />
               <BiasCard
                 bias={
@@ -184,52 +198,33 @@ export default function Dashboard() {
                     ? currentSetup.htf_bias.value
                     : "NEUTRAL"
                 }
-                ruleRefs={currentSetup?.ltf_alignment.rule_refs || ["1.2"]}
+                ruleRefs={currentSetup?.ltf_alignment.rule_refs || []}
                 timeframe="15M"
               />
             </div>
 
             {/* Middle Column */}
             <div className="space-y-4">
-              <SetupCard setup={currentSetup} />
+              <SetupCard
+                setup={currentSetup}
+                keyLevels={llmDecision?.key_levels}
+              />
               <ConfluenceMeter
                 score={currentSetup?.setup.confluence_score || 0}
-                confidence={currentSetup?.confidence || 0}
+                confidence={llmDecision?.confidence || currentSetup?.confidence || 0}
               />
             </div>
 
             {/* Right Column */}
             <div className="space-y-4 md:col-span-2 xl:col-span-1">
+              {/* LLM Reasoning Panel (New!) */}
+              <ReasoningPanel decision={llmDecision} />
+
+              {/* Checklist Panel */}
               <ChecklistPanel checklist={currentSetup?.checklist || null} />
 
-              {/* Agent Nodes */}
-              <Card className="bg-slate-900 border-slate-800">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium text-slate-400">
-                    Agent Pipeline
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex flex-wrap gap-2">
-                    {(currentSetup?.graph_nodes_triggered || []).map((node) => (
-                      <span
-                        key={node}
-                        className="px-2 py-1 text-xs bg-emerald-500/10 text-emerald-400 rounded-md border border-emerald-500/30"
-                      >
-                        {node}
-                      </span>
-                    ))}
-                    {!currentSetup && (
-                      <span className="text-sm text-slate-500">
-                        Select a pair and click Analyze
-                      </span>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-
-              {/* Explanation */}
-              {currentSetup && (
+              {/* Explanation (Legacy) */}
+              {currentSetup && !llmDecision && (
                 <Card className="bg-slate-900 border-slate-800">
                   <CardHeader className="pb-2">
                     <CardTitle className="text-sm font-medium text-slate-400">
@@ -245,8 +240,19 @@ export default function Dashboard() {
               )}
             </div>
           </div>
+
+          {/* Market Facts Debug Panel */}
+          <div className="mt-4">
+            <MarketFactsPanel />
+          </div>
+
+          {/* Live Console */}
+          <div className="mt-4">
+            <LiveConsole />
+          </div>
         </div>
-      </ScrollArea>
+      </div>
     </div>
   );
 }
+

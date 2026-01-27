@@ -1,14 +1,14 @@
 """
 ICT Agentic Trading System - Main Entry Point
 
-This system implements the ICT Rulebook V1 using LangGraph.
+This system implements the ICT Rulebook V1 using the hierarchical agent architecture.
 It does NOT execute trades - only produces Trade Setup Responses.
 """
 import json
 from datetime import datetime
 
-from src.graph import run_analysis
-from src.models import MarketSnapshot
+from src.main_agent import MainAgent
+from src.rules_config import load_rules, PROJECT_ROOT
 
 
 def create_sample_snapshot() -> dict:
@@ -18,7 +18,6 @@ def create_sample_snapshot() -> dict:
     Timestamp: 9:00 AM EST (14:00 UTC) - Within NY Kill Zone (7-10 AM EST)
     """
     # Generate hypothetical 1H candles showing clear bullish structure (HH/HL)
-    # More candles with clear swing points for fractal detection
     candles_1h = [
         # Initial swing low
         {"timestamp": "2026-01-20T06:00:00Z", "open": 1.0800, "high": 1.0820, "low": 1.0790, "close": 1.0810, "volume": 1000},
@@ -104,11 +103,36 @@ def create_sample_snapshot() -> dict:
 
 def main():
     """Run the ICT Trading System with sample data."""
+    # Load rules
+    rules_path = PROJECT_ROOT / "rules" / "config.yaml"
+    if rules_path.exists():
+        load_rules(str(rules_path))
+    
+    # Initialize Agent
+    agent = MainAgent()
+    
     # Create sample market snapshot
     snapshot = create_sample_snapshot()
     
-    # Run analysis
-    result = run_analysis(snapshot)
+    # Initialize Session
+    ts_str = snapshot["timestamp"]
+    if ts_str.endswith('Z'):
+        ts_str = ts_str[:-1] + '+00:00'
+        
+    start_time = datetime.fromisoformat(ts_str)
+    
+    agent.initialize_session(
+        symbol=snapshot["symbol"],
+        mode="BACKTEST",
+        start_time=start_time,
+        starting_balance=snapshot["account_balance"]
+    )
+    
+    # Run tick
+    result = agent.run_tick(
+        timeframe_bars=snapshot["timeframe_bars"],
+        economic_calendar=snapshot["economic_calendar"]
+    )
     
     # Output as JSON
     print(json.dumps(result, indent=2, default=str))

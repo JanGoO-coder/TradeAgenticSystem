@@ -2,7 +2,7 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { TradeSetupResponse } from "@/lib/api";
 import {
@@ -19,21 +19,23 @@ import {
     ListChecks,
     Brain,
     Gauge,
+    Zap,
 } from "lucide-react";
 
 interface BacktestAnalysisPanelProps {
     analysis: TradeSetupResponse | null;
     className?: string;
+    onExecuteTrade?: () => void;
 }
 
 // Checklist item component
-function ChecklistItem({ 
-    label, 
-    passed, 
-    ruleRef 
-}: { 
-    label: string; 
-    passed: boolean; 
+function ChecklistItem({
+    label,
+    passed,
+    ruleRef
+}: {
+    label: string;
+    passed: boolean;
     ruleRef?: string;
 }) {
     return (
@@ -56,14 +58,14 @@ function ChecklistItem({
 }
 
 // Stat box component
-function StatBox({ 
-    label, 
-    value, 
+function StatBox({
+    label,
+    value,
     valueColor = "text-slate-100",
-    small = false 
-}: { 
-    label: string; 
-    value: string | number; 
+    small = false
+}: {
+    label: string;
+    value: string | number;
     valueColor?: string;
     small?: boolean;
 }) {
@@ -77,7 +79,7 @@ function StatBox({
     );
 }
 
-export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnalysisPanelProps) {
+export function BacktestAnalysisPanel({ analysis, className = "", onExecuteTrade }: BacktestAnalysisPanelProps) {
     if (!analysis) {
         return (
             <Card className={`bg-slate-900 border-slate-800 ${className}`}>
@@ -91,23 +93,57 @@ export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnal
         );
     }
 
-    const { htf_bias, setup, risk, checklist, status, reason_short, confidence, explanation } = analysis;
+    // Destructure with safe defaults for all fields
+    const status = analysis.status || 'WAIT';
+    const reason_short = analysis.reason_short || 'Analyzing...';
+    const confidence = analysis.confidence ?? 0;
+    const explanation = analysis.explanation || 'No explanation available';
+
+    // Safe defaults for complex objects
+    const htf_bias = analysis.htf_bias || { value: 'NEUTRAL' as const, rule_refs: [] };
+    const setup = analysis.setup || {
+        name: 'NO_SETUP',
+        type: null,
+        entry_price: null,
+        stop_loss: null,
+        take_profit: null,
+        confluence_score: 0,
+        rule_refs: []
+    };
+    const risk = analysis.risk || {
+        account_balance: 10000,
+        risk_pct: 1.0,
+        position_size: 0,
+        rr: null
+    };
+    const checklist = analysis.checklist || {
+        htf_bias_exists: false,
+        ltf_mss: false,
+        pd_alignment: false,
+        liquidity_sweep_detected: false,
+        session_ok: false,
+        news_ok: false,
+        rr_minimum_met: false
+    };
 
     // Status styling
-    const statusStyles = {
+    const statusStyles: Record<string, string> = {
         TRADE_NOW: "bg-emerald-500/20 text-emerald-400 border-emerald-500/50",
         WAIT: "bg-yellow-500/20 text-yellow-400 border-yellow-500/50",
         NO_TRADE: "bg-slate-500/20 text-slate-400 border-slate-500/50",
     };
 
     // Bias styling
-    const biasStyles = {
+    const biasStyles: Record<string, { bg: string; text: string; icon: typeof TrendingUp }> = {
         BULLISH: { bg: "bg-emerald-500/10", text: "text-emerald-400", icon: TrendingUp },
         BEARISH: { bg: "bg-red-500/10", text: "text-red-400", icon: TrendingDown },
         NEUTRAL: { bg: "bg-slate-500/10", text: "text-slate-400", icon: Minus },
     };
 
-    const BiasIcon = biasStyles[htf_bias.value].icon;
+    // Safe bias value access
+    const biasValue = htf_bias.value || 'NEUTRAL';
+    const biasStyle = biasStyles[biasValue] || biasStyles.NEUTRAL;
+    const BiasIcon = biasStyle.icon;
 
     // Calculate checklist score
     const checklistItems = [
@@ -119,13 +155,13 @@ export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnal
         { key: 'news_ok', label: 'News Clear', ref: '4.3' },
         { key: 'rr_minimum_met', label: 'R:R Met', ref: '5.1' },
     ];
-    
+
     const passedCount = checklistItems.filter(
         item => checklist[item.key as keyof typeof checklist]
     ).length;
 
     return (
-        <ScrollArea className={`${className}`}>
+        <div className={`h-full overflow-y-auto ${className}`}>
             <div className="space-y-3 p-1">
                 {/* Status & Confidence Row */}
                 <Card className="bg-slate-900 border-slate-800">
@@ -139,10 +175,9 @@ export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnal
                             </Badge>
                             <div className="flex items-center gap-2">
                                 <Gauge className="w-3.5 h-3.5 text-slate-500" />
-                                <span className={`text-sm font-medium ${
-                                    confidence >= 70 ? 'text-emerald-400' : 
+                                <span className={`text-sm font-medium ${confidence >= 70 ? 'text-emerald-400' :
                                     confidence >= 50 ? 'text-yellow-400' : 'text-slate-400'
-                                }`}>
+                                    }`}>
                                     {confidence}%
                                 </span>
                             </div>
@@ -160,10 +195,10 @@ export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnal
                         </CardTitle>
                     </CardHeader>
                     <CardContent className="px-3 pb-3">
-                        <div className={`flex items-center gap-2 p-2 rounded ${biasStyles[htf_bias.value].bg}`}>
-                            <BiasIcon className={`w-5 h-5 ${biasStyles[htf_bias.value].text}`} />
-                            <span className={`font-semibold ${biasStyles[htf_bias.value].text}`}>
-                                {htf_bias.value}
+                        <div className={`flex items-center gap-2 p-2 rounded ${biasStyle.bg}`}>
+                            <BiasIcon className={`w-5 h-5 ${biasStyle.text}`} />
+                            <span className={`font-semibold ${biasStyle.text}`}>
+                                {biasValue}
                             </span>
                         </div>
                     </CardContent>
@@ -180,21 +215,21 @@ export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnal
                         </CardHeader>
                         <CardContent className="px-3 pb-3 space-y-2">
                             <div className="grid grid-cols-3 gap-2">
-                                <StatBox 
-                                    label="Entry" 
-                                    value={setup.entry_price?.toFixed(5) || "--"} 
+                                <StatBox
+                                    label="Entry"
+                                    value={setup.entry_price?.toFixed(5) || "--"}
                                     valueColor="text-blue-400"
                                     small
                                 />
-                                <StatBox 
-                                    label="Stop" 
-                                    value={setup.stop_loss?.toFixed(5) || "--"} 
+                                <StatBox
+                                    label="Stop"
+                                    value={setup.stop_loss?.toFixed(5) || "--"}
                                     valueColor="text-red-400"
                                     small
                                 />
-                                <StatBox 
-                                    label="Target" 
-                                    value={setup.take_profit?.[0]?.toFixed(5) || "--"} 
+                                <StatBox
+                                    label="Target"
+                                    value={setup.take_profit?.[0]?.toFixed(5) || "--"}
                                     valueColor="text-emerald-400"
                                     small
                                 />
@@ -203,17 +238,29 @@ export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnal
                                 <span className="text-slate-500">Confluence</span>
                                 <div className="flex items-center gap-2">
                                     <div className="w-20 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                                        <div 
-                                            className={`h-full rounded-full ${
-                                                setup.confluence_score >= 8 ? 'bg-emerald-500' :
+                                        <div
+                                            className={`h-full rounded-full ${setup.confluence_score >= 8 ? 'bg-emerald-500' :
                                                 setup.confluence_score >= 5 ? 'bg-yellow-500' : 'bg-red-500'
-                                            }`}
+                                                }`}
                                             style={{ width: `${(setup.confluence_score / 10) * 100}%` }}
                                         />
                                     </div>
                                     <span className="text-slate-300 font-mono">{setup.confluence_score}/10</span>
                                 </div>
                             </div>
+
+                            {/* Execute Trade Button */}
+                            {status === "TRADE_NOW" && onExecuteTrade && (
+                                <Button
+                                    className="w-full mt-2"
+                                    variant={setup.type === 'LONG' ? 'default' : 'destructive'}
+                                    size="sm"
+                                    onClick={onExecuteTrade}
+                                >
+                                    <Zap className="w-3.5 h-3.5 mr-1.5" />
+                                    Execute {setup.type} Trade
+                                </Button>
+                            )}
                         </CardContent>
                     </Card>
                 )}
@@ -228,14 +275,14 @@ export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnal
                     </CardHeader>
                     <CardContent className="px-3 pb-3">
                         <div className="grid grid-cols-2 gap-2">
-                            <StatBox 
-                                label="Position" 
-                                value={risk.position_size.toFixed(2)} 
+                            <StatBox
+                                label="Position"
+                                value={risk.position_size.toFixed(2)}
                                 small
                             />
-                            <StatBox 
-                                label="R:R" 
-                                value={risk.rr?.toFixed(1) || "--"} 
+                            <StatBox
+                                label="R:R"
+                                value={risk.rr?.toFixed(1) || "--"}
                                 valueColor={risk.rr && risk.rr >= 2 ? "text-emerald-400" : "text-yellow-400"}
                                 small
                             />
@@ -251,10 +298,9 @@ export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnal
                                 <ListChecks className="w-3.5 h-3.5" />
                                 CHECKLIST
                             </span>
-                            <span className={`font-mono ${
-                                passedCount >= 6 ? 'text-emerald-400' :
+                            <span className={`font-mono ${passedCount >= 6 ? 'text-emerald-400' :
                                 passedCount >= 4 ? 'text-yellow-400' : 'text-red-400'
-                            }`}>
+                                }`}>
                                 {passedCount}/{checklistItems.length}
                             </span>
                         </CardTitle>
@@ -288,6 +334,6 @@ export function BacktestAnalysisPanel({ analysis, className = "" }: BacktestAnal
                     </CardContent>
                 </Card>
             </div>
-        </ScrollArea>
+        </div>
     );
 }

@@ -8,9 +8,10 @@ interface BiasCardProps {
     bias: "BULLISH" | "BEARISH" | "NEUTRAL";
     ruleRefs: string[];
     timeframe: string;
+    structureAssessment?: string;
 }
 
-export function BiasCard({ bias, ruleRefs, timeframe }: BiasCardProps) {
+export function BiasCard({ bias, ruleRefs, timeframe, structureAssessment }: BiasCardProps) {
     const getBiasConfig = (bias: string) => {
         switch (bias) {
             case "BULLISH":
@@ -45,9 +46,11 @@ export function BiasCard({ bias, ruleRefs, timeframe }: BiasCardProps) {
             <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium text-slate-400 flex items-center justify-between">
                     <span>{timeframe} Bias</span>
-                    <Badge variant="outline" className="text-xs text-slate-500 border-slate-700">
-                        {ruleRefs.join(", ")}
-                    </Badge>
+                    {ruleRefs.length > 0 && (
+                        <Badge variant="outline" className="text-xs text-slate-500 border-slate-700">
+                            {ruleRefs.join(", ")}
+                        </Badge>
+                    )}
                 </CardTitle>
             </CardHeader>
             <CardContent>
@@ -57,10 +60,13 @@ export function BiasCard({ bias, ruleRefs, timeframe }: BiasCardProps) {
                     </div>
                     <div>
                         <div className={`text-2xl font-bold ${config.color}`}>{bias}</div>
-                        <div className="text-xs text-slate-500">Market Structure</div>
+                        <div className="text-xs text-slate-500">
+                            {structureAssessment || "Market Structure"}
+                        </div>
                     </div>
                 </div>
             </CardContent>
         </Card>
     );
 }
+

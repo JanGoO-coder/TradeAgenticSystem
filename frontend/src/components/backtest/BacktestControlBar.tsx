@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
+import { Progress } from "@/components/ui/progress";
 import {
     Play,
     Pause,
@@ -15,7 +16,17 @@ import {
     ChevronRight,
     FastForward,
     Rewind,
+    Clock,
+    Zap,
+    Bot,
 } from "lucide-react";
+
+interface TickReplayInfo {
+    enabled: boolean;
+    ticks_processed: number;
+    total_ticks: number;
+    fallback?: boolean;
+}
 
 interface BacktestControlBarProps {
     isLoaded: boolean;
@@ -35,6 +46,10 @@ interface BacktestControlBarProps {
     isSteppingForward?: boolean;
     isSteppingBack?: boolean;
     isResetting?: boolean;
+    tickMode?: boolean;
+    agentAutoExecute?: boolean;
+    tickReplayInfo?: TickReplayInfo;
+    isAgentAnalyzing?: boolean;
 }
 
 const speedOptions = [
@@ -63,16 +78,22 @@ export function BacktestControlBar({
     isSteppingForward = false,
     isSteppingBack = false,
     isResetting = false,
+    tickMode = false,
+    agentAutoExecute = false,
+    tickReplayInfo,
+    isAgentAnalyzing = false,
 }: BacktestControlBarProps) {
     const formatTimestamp = (ts?: string) => {
         if (!ts) return "--";
         try {
-            return new Date(ts).toLocaleString("en-US", {
+            const date = new Date(ts);
+            return date.toLocaleString("en-US", {
                 month: "short",
                 day: "numeric",
                 hour: "2-digit",
                 minute: "2-digit",
-            });
+                timeZone: "UTC",
+            }) + " UTC";
         } catch {
             return ts;
         }
@@ -98,7 +119,7 @@ export function BacktestControlBar({
                         />
                         {/* Progress overlay */}
                         <div className="absolute top-1/2 left-0 right-0 h-1 -translate-y-1/2 pointer-events-none">
-                            <div 
+                            <div
                                 className="h-full bg-gradient-to-r from-blue-500/30 to-emerald-500/30 rounded-full"
                                 style={{ width: `${progress}%` }}
                             />
@@ -110,8 +131,9 @@ export function BacktestControlBar({
                 </div>
 
                 {/* Timestamp Display */}
-                <div className="w-36 text-center">
-                    <span className="text-xs text-slate-400 font-mono">
+                <div className="flex items-center gap-1.5 px-2 py-1 bg-slate-800/50 rounded border border-slate-700/50">
+                    <Clock className="w-3.5 h-3.5 text-blue-400" />
+                    <span className="text-xs text-slate-300 font-mono whitespace-nowrap">
                         {formatTimestamp(currentTimestamp)}
                     </span>
                 </div>
@@ -168,8 +190,8 @@ export function BacktestControlBar({
                         onClick={isPlaying ? onPause : onPlay}
                         disabled={!isLoaded}
                         className={`h-8 w-16 ${
-                            isPlaying 
-                                ? "bg-yellow-600 hover:bg-yellow-700" 
+                            isPlaying
+                                ? "bg-yellow-600 hover:bg-yellow-700"
                                 : "bg-emerald-600 hover:bg-emerald-700"
                         }`}
                         title="Play/Pause (Space)"
@@ -231,13 +253,64 @@ export function BacktestControlBar({
                 </div>
 
                 {/* Progress Badge */}
-                <Badge 
-                    variant="outline" 
+                <Badge
+                    variant="outline"
                     className="bg-slate-800 border-slate-700 text-slate-300 font-mono text-xs"
                 >
                     {progress.toFixed(1)}%
                 </Badge>
+
+                {/* Mode Indicators */}
+                <div className="flex items-center gap-1">
+                    {tickMode && (
+                        <Badge
+                            variant="outline"
+                            className="bg-yellow-900/30 border-yellow-700 text-yellow-400 text-[10px] px-1.5"
+                        >
+                            <Zap className="w-3 h-3 mr-0.5" />
+                            TICK
+                        </Badge>
+                    )}
+                    {agentAutoExecute && (
+                        <Badge
+                            variant="outline"
+                            className="bg-purple-900/30 border-purple-700 text-purple-400 text-[10px] px-1.5"
+                        >
+                            <Bot className="w-3 h-3 mr-0.5" />
+                            AUTO
+                        </Badge>
+                    )}
+                </div>
             </div>
+
+            {/* Tick Replay Progress Indicator */}
+            {tickMode && tickReplayInfo && tickReplayInfo.enabled && tickReplayInfo.total_ticks > 0 && (
+                <div className="mt-2 px-4">
+                    <div className="flex items-center gap-2 text-xs text-slate-500">
+                        <Zap className="w-3 h-3 text-yellow-400 animate-pulse" />
+                        <span>
+                            Tick replay: {tickReplayInfo.ticks_processed.toLocaleString()} / {tickReplayInfo.total_ticks.toLocaleString()}
+                        </span>
+                        <div className="flex-1">
+                            <Progress
+                                value={(tickReplayInfo.ticks_processed / tickReplayInfo.total_ticks) * 100}
+                                className="h-1 bg-slate-800"
+                            />
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Agent Analyzing Indicator */}
+            {agentAutoExecute && isAgentAnalyzing && (
+                <div className="mt-2 px-4">
+                    <div className="flex items-center gap-2 text-xs text-purple-400">
+                        <Bot className="w-3 h-3 animate-bounce" />
+                        <span>Agent analyzing bar...</span>
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

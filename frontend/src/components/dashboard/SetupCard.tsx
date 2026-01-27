@@ -4,13 +4,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ArrowRight, Target, StopCircle, TrendingUp, CheckCircle2 } from "lucide-react";
-import { TradeSetupResponse } from "@/lib/api";
+import { TradeSetupResponse, KeyLevels } from "@/lib/api";
 
 interface SetupCardProps {
     setup: TradeSetupResponse | null;
+    keyLevels?: KeyLevels;
 }
 
-export function SetupCard({ setup }: SetupCardProps) {
+export function SetupCard({ setup, keyLevels }: SetupCardProps) {
     if (!setup) {
         return (
             <Card className="bg-slate-900 border-slate-800">
@@ -41,7 +42,12 @@ export function SetupCard({ setup }: SetupCardProps) {
         }
     };
 
-    const statusConfig = getStatusConfig(setup.status);
+    const statusConfig = getStatusConfig(setup.status || "NO_TRADE");
+
+    // Use LLM key levels if available, otherwise fallback to legacy setup fields
+    const entryPrice = keyLevels?.entry_zone ?? setup.setup.entry_price;
+    const stopLoss = keyLevels?.stop_loss ?? setup.setup.stop_loss;
+    const takeProfit = keyLevels?.target ?? setup.setup.take_profit?.[0];
 
     return (
         <Card className="bg-slate-900 border-slate-800">
@@ -67,25 +73,25 @@ export function SetupCard({ setup }: SetupCardProps) {
                         </div>
                     </div>
 
-                    {/* Price Levels */}
-                    {setup.setup.entry_price && (
+                    {/* Price Levels - Show if any level is available */}
+                    {(entryPrice || stopLoss || takeProfit) && (
                         <div className="grid grid-cols-3 gap-2 text-sm">
                             <div className="bg-slate-800 rounded-lg p-2">
                                 <div className="text-slate-500 text-xs">Entry</div>
                                 <div className="text-slate-100 font-mono">
-                                    {setup.setup.entry_price.toFixed(5)}
+                                    {entryPrice?.toFixed(5) || "-"}
                                 </div>
                             </div>
                             <div className="bg-slate-800 rounded-lg p-2">
                                 <div className="text-slate-500 text-xs">Stop Loss</div>
                                 <div className="text-red-400 font-mono">
-                                    {setup.setup.stop_loss?.toFixed(5) || "-"}
+                                    {stopLoss?.toFixed(5) || "-"}
                                 </div>
                             </div>
                             <div className="bg-slate-800 rounded-lg p-2">
                                 <div className="text-slate-500 text-xs">Take Profit</div>
                                 <div className="text-emerald-400 font-mono">
-                                    {setup.setup.take_profit?.[0]?.toFixed(5) || "-"}
+                                    {takeProfit?.toFixed(5) || "-"}
                                 </div>
                             </div>
                         </div>
@@ -102,15 +108,17 @@ export function SetupCard({ setup }: SetupCardProps) {
                         <div>
                             <span className="text-slate-500 text-sm">R:R:</span>
                             <span className="ml-2 text-emerald-400 font-semibold">
-                                1:{setup.risk.rr?.toFixed(1) || "-"}
+                                1:{setup.risk?.rr?.toFixed(1) || "-"}
                             </span>
                         </div>
                     </div>
 
                     {/* Reason */}
-                    <div className="text-xs text-slate-500 bg-slate-800/50 rounded p-2">
-                        {setup.reason_short}
-                    </div>
+                    {setup.reason_short && (
+                        <div className="text-xs text-slate-500 bg-slate-800/50 rounded p-2">
+                            {setup.reason_short}
+                        </div>
+                    )}
 
                     {/* Action Buttons */}
                     {setup.status === "TRADE_NOW" && (
@@ -129,3 +137,4 @@ export function SetupCard({ setup }: SetupCardProps) {
         </Card>
     );
 }
+

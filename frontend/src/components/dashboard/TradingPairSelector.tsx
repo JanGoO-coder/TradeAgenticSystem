@@ -67,7 +67,7 @@ function categorizeSymbols(symbols: string[]): {
 
     symbols.forEach((symbol) => {
         const formatted = { value: symbol, label: formatSymbolLabel(symbol) };
-        
+
         if (cryptoPatterns.test(symbol)) {
             result.crypto.push(formatted);
         } else if (commodityPatterns.test(symbol)) {
@@ -103,7 +103,7 @@ function formatSymbolLabel(symbol: string): string {
         BTCUSD: "Bitcoin (BTC/USD)",
         ETHUSD: "Ethereum (ETH/USD)",
     };
-    
+
     return labelMap[symbol] || symbol;
 }
 
@@ -114,13 +114,13 @@ interface TradingPairSelectorProps {
     mt5Symbols?: string[];  // Optional MT5 symbols from API
 }
 
-export function TradingPairSelector({ 
-    value, 
-    onChange, 
+export function TradingPairSelector({
+    value,
+    onChange,
     className,
-    mt5Symbols 
+    mt5Symbols
 }: TradingPairSelectorProps) {
-    
+
     // Categorize symbols - use MT5 symbols if available, else fallback to defaults
     const categorized = useMemo(() => {
         if (mt5Symbols && mt5Symbols.length > 0) {

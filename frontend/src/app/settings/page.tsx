@@ -7,7 +7,6 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -136,7 +135,7 @@ export default function SettingsPage() {
                 agentAvailable={health?.agent_available || false}
             />
 
-            <ScrollArea className="flex-1">
+            <div className="flex-1 overflow-y-auto">
                 <div className="p-4 min-w-0">
                     <div className="flex items-center gap-3 mb-4">
                         <SettingsIcon className="w-5 h-5 text-slate-400" />
@@ -404,7 +403,7 @@ export default function SettingsPage() {
                         </CardContent>
                     </Card>
                 </div>
-            </ScrollArea>
+            </div>
         </div>
     );
 }

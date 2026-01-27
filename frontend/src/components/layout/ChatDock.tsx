@@ -3,7 +3,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { MessageSquare, Send, Loader2, Bot, User } from "lucide-react";
 import { sendChatMessage, ChatResponse } from "@/lib/api";
@@ -94,7 +93,7 @@ export function ChatDock() {
 
                 <div className="flex flex-col flex-1 min-h-0">
                     {/* Messages */}
-                    <ScrollArea className="flex-1 pr-4 mt-4" ref={scrollRef}>
+                    <div className="flex-1 pr-4 mt-4 overflow-y-auto" ref={scrollRef}>
                         <div className="space-y-4 pb-4">
                             {messages.map((msg, i) => (
                                 <div key={i} className="space-y-2">
@@ -155,7 +154,7 @@ export function ChatDock() {
                                 </div>
                             )}
                         </div>
-                    </ScrollArea>
+                    </div>
 
                     {/* Input */}
                     <div className="border-t border-slate-800 pt-4 mt-auto">

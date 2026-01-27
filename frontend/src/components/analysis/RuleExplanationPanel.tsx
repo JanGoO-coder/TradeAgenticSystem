@@ -2,7 +2,6 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
     CheckCircle2,
@@ -143,7 +142,7 @@ export function RuleExplanationPanel({ checklist, ruleRefs, explanation }: RuleE
                 </div>
             </CardHeader>
             <CardContent>
-                <ScrollArea className="h-[350px] pr-4">
+                <div className="h-[350px] pr-4 overflow-y-auto">
                     <div className="space-y-2">
                         {/* Explanation Summary */}
                         {explanation && (
@@ -189,7 +188,7 @@ export function RuleExplanationPanel({ checklist, ruleRefs, explanation }: RuleE
                             </>
                         )}
                     </div>
-                </ScrollArea>
+                </div>
             </CardContent>
         </Card>
     );

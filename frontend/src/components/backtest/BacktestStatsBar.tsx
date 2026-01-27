@@ -2,16 +2,21 @@
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { 
-    Calendar, 
-    Server, 
-    Clock, 
+import {
+    Calendar,
+    Server,
+    Clock,
     TrendingUp,
+    TrendingDown,
     Settings2,
     Database,
     Loader2,
+    Download,
+    Target,
+    Percent,
 } from "lucide-react";
 import { MT5StatusPill } from "@/components/dashboard/MT5StatusPill";
+import { BacktestStatistics } from "@/lib/api";
 
 interface BacktestStatsBarProps {
     symbol: string;
@@ -22,8 +27,11 @@ interface BacktestStatsBarProps {
     isLoading?: boolean;
     totalBars: number;
     currentSession?: string;
+    statistics?: BacktestStatistics | null;
     onConfigClick: () => void;
     onLoadClick: () => void;
+    onExportClick?: () => void;
+    isExporting?: boolean;
 }
 
 export function BacktestStatsBar({
@@ -35,8 +43,11 @@ export function BacktestStatsBar({
     isLoading = false,
     totalBars,
     currentSession,
+    statistics,
     onConfigClick,
     onLoadClick,
+    onExportClick,
+    isExporting = false,
 }: BacktestStatsBarProps) {
     const formatDate = (dateStr: string) => {
         try {
@@ -70,10 +81,10 @@ export function BacktestStatsBar({
                     </div>
 
                     {/* Data Source Badge */}
-                    <Badge 
-                        variant="outline" 
-                        className={dataSource === "mt5" 
-                            ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/50" 
+                    <Badge
+                        variant="outline"
+                        className={dataSource === "mt5"
+                            ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/50"
                             : "bg-slate-500/20 text-slate-400 border-slate-500/50"
                         }
                     >
@@ -88,18 +99,66 @@ export function BacktestStatsBar({
                             {totalBars} bars
                         </Badge>
                     )}
+
+                    {/* Backtest Statistics */}
+                    {statistics && statistics.total_trades > 0 && (
+                        <>
+                            <div className="h-4 w-px bg-slate-700" />
+
+                            {/* Trades Count */}
+                            <Badge variant="outline" className="bg-slate-800 border-slate-700 text-slate-300">
+                                <Target className="w-3 h-3 mr-1" />
+                                {statistics.total_trades} trades
+                            </Badge>
+
+                            {/* Win Rate */}
+                            <Badge
+                                variant="outline"
+                                className={statistics.win_rate >= 0.5
+                                    ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/50"
+                                    : "bg-red-500/20 text-red-400 border-red-500/50"
+                                }
+                            >
+                                <Percent className="w-3 h-3 mr-1" />
+                                {(statistics.win_rate * 100).toFixed(1)}% WR
+                            </Badge>
+
+                            {/* Total P&L */}
+                            <Badge
+                                variant="outline"
+                                className={statistics.total_pnl_pips >= 0
+                                    ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/50"
+                                    : "bg-red-500/20 text-red-400 border-red-500/50"
+                                }
+                            >
+                                {statistics.total_pnl_pips >= 0 ? (
+                                    <TrendingUp className="w-3 h-3 mr-1" />
+                                ) : (
+                                    <TrendingDown className="w-3 h-3 mr-1" />
+                                )}
+                                {statistics.total_pnl_pips >= 0 ? "+" : ""}{statistics.total_pnl_pips.toFixed(1)} pips
+                            </Badge>
+
+                            {/* Profit Factor */}
+                            {statistics.profit_factor > 0 && statistics.profit_factor !== Infinity && (
+                                <Badge variant="outline" className="bg-slate-800 border-slate-700 text-slate-300">
+                                    PF: {statistics.profit_factor.toFixed(2)}
+                                </Badge>
+                            )}
+                        </>
+                    )}
                 </div>
 
                 {/* Right: MT5 Status & Actions */}
                 <div className="flex items-center gap-3">
                     {/* Session (if available) */}
                     {currentSession && (
-                        <Badge 
-                            variant="outline" 
+                        <Badge
+                            variant="outline"
                             className={
-                                currentSession === "London" 
+                                currentSession === "London"
                                     ? "bg-blue-500/20 text-blue-400 border-blue-500/50"
-                                    : currentSession === "NY" 
+                                    : currentSession === "NY"
                                         ? "bg-orange-500/20 text-orange-400 border-orange-500/50"
                                         : "bg-purple-500/20 text-purple-400 border-purple-500/50"
                             }
@@ -142,6 +201,24 @@ export function BacktestStatsBar({
                             </>
                         )}
                     </Button>
+
+                    {/* Export Button */}
+                    {isLoaded && statistics && statistics.total_trades > 0 && onExportClick && (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={onExportClick}
+                            disabled={isExporting}
+                            className="h-7 border-slate-700 text-slate-400 hover:text-slate-100"
+                        >
+                            {isExporting ? (
+                                <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                            ) : (
+                                <Download className="w-3.5 h-3.5 mr-1" />
+                            )}
+                            Export
+                        </Button>
+                    )}
                 </div>
             </div>
         </div>

@@ -3,17 +3,30 @@
 import { useState, useEffect, useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Header } from "@/components/layout/Header";
-import { 
-    getHealth, 
-    analyzeMarket, 
-    TradeSetupResponse, 
-    getMT5Status, 
-    getMT5Symbols, 
-    connectMT5 
+import {
+    getHealth,
+    getMT5Status,
+    getMT5Symbols,
+    connectMT5,
+    OrderRequest,
+    // New unified session API
+    initSession,
+    getBacktestSessionState,
+    advanceTime,
+    getSessionStatistics,
+    analyzeCurrentBar,
+    downloadBacktestResults,
+    BacktestSessionState,
+    SessionStatistics,
+    HierarchicalPosition,
+    HierarchicalClosedTrade,
+    InitSessionRequest,
+    AdvanceTimeResponse,
+    TradeSetupResponse,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Keyboard } from "lucide-react";
+import { ArrowLeft, Keyboard, PanelRightOpen, PanelRightClose } from "lucide-react";
 import Link from "next/link";
 
 // Backtest components
@@ -22,6 +35,8 @@ import { BacktestControlBar } from "@/components/backtest/BacktestControlBar";
 import { BacktestAnalysisPanel } from "@/components/backtest/BacktestAnalysisPanel";
 import { BacktestStatsBar } from "@/components/backtest/BacktestStatsBar";
 import { BacktestConfigSheet } from "@/components/backtest/BacktestConfigSheet";
+import { BacktestTradePanel } from "@/components/backtest/BacktestTradePanel";
+import { TradeConfirmDialog } from "@/components/backtest/TradeConfirmDialog";
 import {
     Tooltip,
     TooltipContent,
@@ -31,18 +46,16 @@ import {
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-interface BacktestStatus {
-    loaded: boolean;
-    running: boolean;
-    symbol: string | null;
-    from_date: string | null;
-    to_date: string | null;
-    current_index: number;
-    total_bars: number;
-    progress: number;
+interface BacktestConfig {
+    symbol: string;
+    fromDate: string;
+    toDate: string;
+    timeframes: string[];
+    initialBalance?: number;
+    riskPerTrade?: number;
 }
 
-interface BacktestSnapshot {
+interface ChartSnapshot {
     symbol: string;
     timestamp: string;
     current_index: number;
@@ -58,16 +71,9 @@ interface BacktestSnapshot {
     }>>;
 }
 
-interface BacktestConfig {
-    symbol: string;
-    fromDate: string;
-    toDate: string;
-    timeframes: string[];
-}
-
 export default function BacktestPage() {
     const queryClient = useQueryClient();
-    
+
     // Config state
     const [config, setConfig] = useState<BacktestConfig>(() => ({
         symbol: "EURUSD",
@@ -78,8 +84,10 @@ export default function BacktestPage() {
         })(),
         toDate: new Date().toISOString().split('T')[0],
         timeframes: ["1H", "15M", "5M"],
+        initialBalance: 10000,
+        riskPerTrade: 1.0,
     }));
-    
+
     // UI state
     const [configOpen, setConfigOpen] = useState(false);
     const [selectedTimeframe, setSelectedTimeframe] = useState("1H");
@@ -87,7 +95,13 @@ export default function BacktestPage() {
     const [isPlaying, setIsPlaying] = useState(false);
     const [analysisResult, setAnalysisResult] = useState<TradeSetupResponse | null>(null);
     const [dataSource, setDataSource] = useState<"mt5" | "sample">("sample");
-    const [currentSnapshot, setCurrentSnapshot] = useState<BacktestSnapshot | null>(null);
+    const [chartSnapshot, setChartSnapshot] = useState<ChartSnapshot | null>(null);
+
+    // Trade panel state
+    const [tradePanelOpen, setTradePanelOpen] = useState(false);
+    const [tradeConfirmOpen, setTradeConfirmOpen] = useState(false);
+    const [pendingOrder, setPendingOrder] = useState<Partial<OrderRequest> | null>(null);
+    const [isExporting, setIsExporting] = useState(false);
 
     // Health query
     const { data: health } = useQuery({
@@ -117,83 +131,97 @@ export default function BacktestPage() {
             connectMT5().then(() => {
                 queryClient.invalidateQueries({ queryKey: ["mt5Status"] });
                 queryClient.invalidateQueries({ queryKey: ["mt5Symbols"] });
-            }).catch(() => {});
+            }).catch(() => { });
         }
     }, [mt5Status?.available, mt5Status?.connected, queryClient]);
 
-    // Backtest status query
-    const { data: backtestStatus, refetch: refetchStatus } = useQuery<BacktestStatus>({
-        queryKey: ["backtestStatus"],
-        queryFn: async () => {
-            const res = await fetch(`${API_BASE_URL}/api/v1/market-data/backtest/status`);
-            if (!res.ok) throw new Error("Failed to fetch backtest status");
-            return res.json();
-        },
-        refetchInterval: isPlaying ? 1000 / speed : false,
+    // Session state query (replaces backtest status)
+    const { data: sessionState, refetch: refetchSession } = useQuery<BacktestSessionState | null>({
+        queryKey: ["sessionState"],
+        queryFn: getBacktestSessionState,
+        refetchInterval: isPlaying ? 1000 / speed : 2000,
     });
 
-    // Load backtest data mutation
-    const loadMutation = useMutation({
-        mutationFn: async () => {
-            const res = await fetch(`${API_BASE_URL}/api/v1/market-data/backtest/load`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    symbol: config.symbol,
-                    from_date: new Date(config.fromDate).toISOString(),
-                    to_date: new Date(config.toDate).toISOString(),
-                    timeframes: config.timeframes,
-                }),
-            });
-            if (!res.ok) throw new Error("Failed to load backtest data");
-            return res.json();
-        },
-        onSuccess: (data) => {
-            refetchStatus();
-            setAnalysisResult(null);
-            setDataSource(data.source === "mt5" ? "mt5" : "sample");
-            // Fetch initial snapshot
-            fetchSnapshot();
-        },
+    // Session statistics query
+    const { data: sessionStatistics } = useQuery<SessionStatistics>({
+        queryKey: ["sessionStatistics"],
+        queryFn: getSessionStatistics,
+        enabled: sessionState?.mode === 'BACKTEST',
+        refetchInterval: 2000,
     });
 
-    // Fetch snapshot
-    const fetchSnapshot = async () => {
+    // Export handler
+    const handleExport = async () => {
+        setIsExporting(true);
         try {
-            const res = await fetch(`${API_BASE_URL}/api/v1/market-data/backtest/snapshot`);
-            if (res.ok) {
-                const snapshot = await res.json();
-                setCurrentSnapshot(snapshot);
-            }
+            await downloadBacktestResults();
         } catch (error) {
-            console.error("Failed to fetch snapshot:", error);
+            console.error("Export failed:", error);
+        } finally {
+            setIsExporting(false);
         }
     };
 
-    // Step forward mutation
-    const stepMutation = useMutation({
-        mutationFn: async (bars: number = 1) => {
-            const res = await fetch(`${API_BASE_URL}/api/v1/market-data/backtest/step`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ bars }),
-            });
-            if (!res.ok) throw new Error("Failed to step backtest");
-            return res.json();
+    // Initialize session mutation (replaces load backtest)
+    const initMutation = useMutation({
+        mutationFn: async () => {
+            const request: InitSessionRequest = {
+                symbol: config.symbol,
+                mode: 'BACKTEST',
+                start_time: new Date(config.fromDate).toISOString(),
+                end_time: new Date(config.toDate).toISOString(),
+                starting_balance: config.initialBalance,
+                timeframes: config.timeframes,
+            };
+            return initSession(request);
         },
-        onSuccess: (data) => {
-            refetchStatus();
-            if (data.snapshot) {
-                setCurrentSnapshot(data.snapshot);
-                runAnalysis(data.snapshot);
+        onSuccess: async (data) => {
+            refetchSession();
+            setAnalysisResult(null);
+            setDataSource("mt5");  // Session API uses MT5 data
+            // Fetch initial chart data
+            fetchChartSnapshot();
+            // Advance a few bars to get initial data and run analysis
+            try {
+                await advanceTime({ bars: 10, tick_mode: false });
+                fetchChartSnapshot();
+                runAnalysis();
+            } catch (e) {
+                console.error("Initial advance failed:", e);
             }
         },
     });
 
-    // Step backward mutation
+    // Fetch chart snapshot from backtest service (for chart data)
+    const fetchChartSnapshot = async () => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/api/v1/session/snapshot`);
+            if (res.ok) {
+                const snapshot = await res.json();
+                setChartSnapshot(snapshot);
+            }
+        } catch (error) {
+            console.error("Failed to fetch chart snapshot:", error);
+        }
+    };
+
+    // Advance time mutation (replaces step forward)
+    const advanceMutation = useMutation({
+        mutationFn: async (bars: number = 1) => {
+            return advanceTime({ bars, tick_mode: false });
+        },
+        onSuccess: (data) => {
+            refetchSession();
+            fetchChartSnapshot();
+            // Run analysis after advancing
+            runAnalysis();
+        },
+    });
+
+    // Step backward mutation (still uses backtest service for now)
     const stepBackMutation = useMutation({
         mutationFn: async (bars: number = 1) => {
-            const res = await fetch(`${API_BASE_URL}/api/v1/market-data/backtest/step-back`, {
+            const res = await fetch(`${API_BASE_URL}/api/v1/session/step-back`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ bars }),
@@ -202,34 +230,32 @@ export default function BacktestPage() {
             return res.json();
         },
         onSuccess: (data) => {
-            refetchStatus();
-            if (data.snapshot) {
-                setCurrentSnapshot(data.snapshot);
-            }
+            refetchSession();
+            fetchChartSnapshot();
         },
     });
 
     // Reset mutation
     const resetMutation = useMutation({
         mutationFn: async () => {
-            const res = await fetch(`${API_BASE_URL}/api/v1/market-data/backtest/reset`, {
+            const res = await fetch(`${API_BASE_URL}/api/v1/session/reset`, {
                 method: 'POST',
             });
             if (!res.ok) throw new Error("Failed to reset backtest");
             return res.json();
         },
         onSuccess: () => {
-            refetchStatus();
+            refetchSession();
             setAnalysisResult(null);
             setIsPlaying(false);
-            fetchSnapshot();
+            fetchChartSnapshot();
         },
     });
 
     // Jump to mutation
     const jumpMutation = useMutation({
         mutationFn: async (index: number) => {
-            const res = await fetch(`${API_BASE_URL}/api/v1/market-data/backtest/jump`, {
+            const res = await fetch(`${API_BASE_URL}/api/v1/session/jump`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ index }),
@@ -238,26 +264,21 @@ export default function BacktestPage() {
             return res.json();
         },
         onSuccess: (data) => {
-            refetchStatus();
-            if (data.snapshot) {
-                setCurrentSnapshot(data.snapshot);
-            }
+            refetchSession();
+            fetchChartSnapshot();
         },
     });
 
-    // Run analysis
-    const runAnalysis = async (snapshot: BacktestSnapshot) => {
+    // Run analysis using session API
+    const runAnalysis = async () => {
         try {
-            const marketData = {
-                symbol: snapshot.symbol,
-                timestamp: snapshot.timestamp,
-                timeframe_bars: snapshot.timeframe_bars,
-                account_balance: 10000.0,
-                risk_pct: 1.0,
-                economic_calendar: [],
-            };
-            const result = await analyzeMarket(marketData);
-            setAnalysisResult(result);
+            const result = await analyzeCurrentBar();
+            // The API returns { success: bool, analysis: {...}, error?: string }
+            if (result.success && result.analysis) {
+                setAnalysisResult(result.analysis as unknown as TradeSetupResponse);
+            } else if (!result.success) {
+                console.warn("Analysis error:", result.error);
+            }
         } catch (error) {
             console.error("Analysis failed:", error);
         }
@@ -269,26 +290,29 @@ export default function BacktestPage() {
 
     // Auto-step when playing
     useEffect(() => {
-        if (!isPlaying || !backtestStatus?.loaded || stepMutation.isPending) return;
-        
+        if (!isPlaying || !sessionState?.mode || advanceMutation.isPending) return;
+        if (sessionState.mode !== 'BACKTEST') return;
+
         const interval = setInterval(() => {
-            if (backtestStatus.current_index < backtestStatus.total_bars - 1) {
-                stepMutation.mutate(1);
+            const currentIndex = sessionState.current_bar_index ?? 0;
+            const totalBars = sessionState.total_bars ?? 0;
+            if (currentIndex < totalBars - 1) {
+                advanceMutation.mutate(1);
             } else {
                 setIsPlaying(false);
             }
         }, 1000 / speed);
 
         return () => clearInterval(interval);
-    }, [isPlaying, backtestStatus?.loaded, backtestStatus?.current_index, backtestStatus?.total_bars, speed, stepMutation.isPending]);
+    }, [isPlaying, sessionState?.mode, sessionState?.current_bar_index, sessionState?.total_bars, speed, advanceMutation.isPending]);
 
     // Keyboard shortcuts
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             // Ignore if typing in an input
             if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-            
-            const isLoaded = backtestStatus?.loaded;
+
+            const isLoaded = sessionState?.mode === 'BACKTEST';
             if (!isLoaded) return;
 
             switch (e.code) {
@@ -299,8 +323,8 @@ export default function BacktestPage() {
                     break;
                 case "ArrowRight":
                     e.preventDefault();
-                    if (!stepMutation.isPending) {
-                        stepMutation.mutate(e.shiftKey ? 5 : 1);
+                    if (!advanceMutation.isPending) {
+                        advanceMutation.mutate(e.shiftKey ? 5 : 1);
                     }
                     break;
                 case "ArrowLeft":
@@ -330,12 +354,37 @@ export default function BacktestPage() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [isPlaying, backtestStatus?.loaded, stepMutation.isPending, stepBackMutation.isPending]);
+    }, [isPlaying, sessionState?.mode, advanceMutation.isPending, stepBackMutation.isPending]);
 
     // Derived state
-    const isLoaded = backtestStatus?.loaded || false;
-    const progress = backtestStatus?.progress || 0;
-    const chartData = currentSnapshot?.timeframe_bars || {};
+    const isLoaded = sessionState?.mode === 'BACKTEST';
+    const currentIndex = sessionState?.current_bar_index ?? 0;
+    const totalBars = sessionState?.total_bars ?? 0;
+    const progress = totalBars > 0 ? (currentIndex / totalBars) * 100 : 0;
+    const chartData = chartSnapshot?.timeframe_bars || {};
+
+    // Convert session statistics to backtest statistics format for stats bar
+    const backtestStatistics = sessionStatistics ? {
+        total_trades: sessionStatistics.total_trades,
+        winners: sessionStatistics.winners,
+        losers: sessionStatistics.losers,
+        win_rate: sessionStatistics.win_rate,
+        profit_factor: sessionStatistics.profit_factor,
+        total_pnl_pips: sessionStatistics.total_pnl_pips,
+        total_pnl_usd: sessionStatistics.total_pnl_usd,
+        gross_profit_pips: sessionStatistics.gross_profit_pips,
+        gross_loss_pips: sessionStatistics.gross_loss_pips,
+        max_drawdown_pips: sessionStatistics.max_drawdown_pips,
+        average_rr: sessionStatistics.average_rr,
+        largest_win_pips: sessionStatistics.largest_win_pips,
+        largest_loss_pips: sessionStatistics.largest_loss_pips,
+        average_win_pips: sessionStatistics.average_win_pips,
+        average_loss_pips: sessionStatistics.average_loss_pips,
+        consecutive_wins: sessionStatistics.consecutive_wins,
+        consecutive_losses: sessionStatistics.consecutive_losses,
+        current_balance: sessionStatistics.current_balance,
+        starting_balance: sessionStatistics.starting_balance,
+    } : null;
 
     // Price levels for chart
     const priceLevels = analysisResult?.setup?.entry_price ? [
@@ -344,8 +393,10 @@ export default function BacktestPage() {
         ...(analysisResult.setup.take_profit?.[0] ? [{ price: analysisResult.setup.take_profit[0], label: "TP", type: "target" as const }] : []),
     ] : [];
 
-    // Get current timestamp from snapshot
-    const currentTimestamp = currentSnapshot?.timeframe_bars?.["1H"]?.slice(-1)?.[0]?.timestamp;
+    // Get current timestamp from snapshot - use the selected timeframe's last candle
+    const currentTimestamp = chartSnapshot?.timeframe_bars?.[selectedTimeframe]?.slice(-1)?.[0]?.timestamp
+        || sessionState?.current_time
+        || chartSnapshot?.timestamp;
 
     return (
         <div className="flex flex-col h-screen w-full overflow-hidden bg-slate-950">
@@ -362,10 +413,13 @@ export default function BacktestPage() {
                 toDate={config.toDate}
                 dataSource={dataSource}
                 isLoaded={isLoaded}
-                isLoading={loadMutation.isPending}
-                totalBars={backtestStatus?.total_bars || 0}
+                isLoading={initMutation.isPending}
+                totalBars={totalBars}
+                statistics={backtestStatistics}
                 onConfigClick={() => setConfigOpen(true)}
-                onLoadClick={() => loadMutation.mutate()}
+                onLoadClick={() => initMutation.mutate()}
+                onExportClick={handleExport}
+                isExporting={isExporting}
             />
 
             {/* Main Content Area */}
@@ -385,7 +439,7 @@ export default function BacktestPage() {
                                 SIMULATION
                             </Badge>
                         </div>
-                        
+
                         {/* Keyboard shortcuts hint */}
                         <TooltipProvider>
                             <Tooltip>
@@ -407,6 +461,30 @@ export default function BacktestPage() {
                                 </TooltipContent>
                             </Tooltip>
                         </TooltipProvider>
+
+                        {/* Trade Panel Toggle */}
+                        <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Button
+                                        variant={tradePanelOpen ? "secondary" : "ghost"}
+                                        size="sm"
+                                        className="h-7 text-xs"
+                                        onClick={() => setTradePanelOpen(!tradePanelOpen)}
+                                    >
+                                        {tradePanelOpen ? (
+                                            <PanelRightClose className="w-3.5 h-3.5 mr-1" />
+                                        ) : (
+                                            <PanelRightOpen className="w-3.5 h-3.5 mr-1" />
+                                        )}
+                                        Trading
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="bottom" className="bg-slate-900 border-slate-700 text-xs">
+                                    Toggle trading panel
+                                </TooltipContent>
+                            </Tooltip>
+                        </TooltipProvider>
                     </div>
 
                     {/* Chart */}
@@ -420,32 +498,55 @@ export default function BacktestPage() {
                     />
                 </div>
 
-                {/* Analysis Panel (Right - 30%) */}
+                {/* Analysis Panel (Right) */}
                 <div className="w-[320px] flex-shrink-0 border-l border-slate-800 bg-slate-950">
-                    <BacktestAnalysisPanel 
-                        analysis={analysisResult} 
+                    <BacktestAnalysisPanel
+                        analysis={analysisResult}
                         className="h-full"
+                        onExecuteTrade={analysisResult?.setup?.entry_price ? () => {
+                            // Build order from analysis
+                            const setup = analysisResult.setup;
+                            const order: Partial<OrderRequest> = {
+                                symbol: analysisResult.symbol,
+                                order_type: setup.type === 'LONG' ? 'MARKET_BUY' : 'MARKET_SELL',
+                                stop_loss: setup.stop_loss || 0,
+                                take_profit: setup.take_profit?.[0],
+                                price: setup.entry_price || 0,
+                            };
+                            setPendingOrder(order);
+                            setTradeConfirmOpen(true);
+                        } : undefined}
                     />
                 </div>
+
+                {/* Trade Panel (Far Right - Collapsible) */}
+                {tradePanelOpen && (
+                    <div className="w-[300px] flex-shrink-0 border-l border-slate-800 bg-slate-950">
+                        <BacktestTradePanel
+                            className="h-full"
+                            isBacktestLoaded={isLoaded}
+                        />
+                    </div>
+                )}
             </div>
 
             {/* Bottom Control Bar */}
             <BacktestControlBar
                 isLoaded={isLoaded}
                 isPlaying={isPlaying}
-                currentIndex={backtestStatus?.current_index || 0}
-                totalBars={backtestStatus?.total_bars || 0}
+                currentIndex={currentIndex}
+                totalBars={totalBars}
                 progress={progress}
                 speed={speed}
                 currentTimestamp={currentTimestamp}
                 onPlay={handlePlay}
                 onPause={handlePause}
-                onStepForward={(bars) => stepMutation.mutate(bars)}
+                onStepForward={(bars) => advanceMutation.mutate(bars)}
                 onStepBack={(bars) => stepBackMutation.mutate(bars)}
                 onReset={() => resetMutation.mutate()}
                 onJumpTo={(index) => jumpMutation.mutate(index)}
                 onSpeedChange={setSpeed}
-                isSteppingForward={stepMutation.isPending}
+                isSteppingForward={advanceMutation.isPending}
                 isSteppingBack={stepBackMutation.isPending}
                 isResetting={resetMutation.isPending}
             />
@@ -456,8 +557,30 @@ export default function BacktestPage() {
                 onOpenChange={setConfigOpen}
                 config={config}
                 onConfigChange={setConfig}
-                onApply={() => loadMutation.mutate()}
+                onApply={() => initMutation.mutate()}
                 mt5Symbols={mt5SymbolsData?.symbols}
+            />
+
+            {/* Trade Confirmation Dialog */}
+            <TradeConfirmDialog
+                open={tradeConfirmOpen}
+                onOpenChange={setTradeConfirmOpen}
+                order={pendingOrder}
+                backtestMode={true}
+                onSuccess={(response) => {
+                    if (response.success) {
+                        // Toast notification for successful trade
+                        console.log('Trade executed:', response);
+                        // Invalidate queries to refresh positions
+                        queryClient.invalidateQueries({ queryKey: ['sessionState'] });
+                        queryClient.invalidateQueries({ queryKey: ['sessionStatistics'] });
+                    }
+                    setPendingOrder(null);
+                }}
+                onError={(error) => {
+                    console.error('Trade failed:', error);
+                    setPendingOrder(null);
+                }}
             />
         </div>
     );
