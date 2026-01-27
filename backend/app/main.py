@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.api.v1 import analysis, session, health, chat, execution, data, market_data
+from app.api.v1 import agent, backtest, ai_chat, strategies
 from app.api.v1.websocket import router as websocket_router
 
 # Get settings
@@ -63,6 +64,30 @@ app.include_router(
 # Market data / MT5 router
 app.include_router(
     market_data.router,
+    prefix=settings.api_v1_prefix
+)
+
+# New LLM Agent endpoints
+app.include_router(
+    agent.router,
+    prefix=settings.api_v1_prefix
+)
+
+# Smart Backtest endpoints
+app.include_router(
+    backtest.router,
+    prefix=settings.api_v1_prefix
+)
+
+# AI Chat (RAG-powered)
+app.include_router(
+    ai_chat.router,
+    prefix=settings.api_v1_prefix
+)
+
+# Strategy Management (add/remove rules)
+app.include_router(
+    strategies.router,
     prefix=settings.api_v1_prefix
 )
 

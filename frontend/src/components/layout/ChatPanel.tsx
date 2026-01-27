@@ -3,28 +3,31 @@
 import { useState, useRef, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { sendChatMessage, ChatResponse } from "@/lib/api";
-import { Send, Loader2, Bot, User } from "lucide-react";
+import { sendAIChat, AIChat, StrategySearchResult } from "@/lib/api";
+import { Send, Loader2, Bot, User, BookOpen, ChevronDown, ChevronUp } from "lucide-react";
 
 interface Message {
     role: "user" | "assistant";
     content: string;
     suggestions?: string[];
+    sources?: StrategySearchResult[];
 }
 
 interface ChatPanelProps {
     isOpen: boolean;
+    currentContext?: Record<string, unknown>;
 }
 
-export function ChatPanel({ isOpen }: ChatPanelProps) {
+export function ChatPanel({ isOpen, currentContext }: ChatPanelProps) {
     const [messages, setMessages] = useState<Message[]>([
         {
             role: "assistant",
-            content: "Hello! I'm your ICT Trading Assistant. Ask me about:\n\n• Current session status\n• ICT rules (1.1, 8.1, etc.)\n• Entry models",
-            suggestions: ["What's the current session?", "Explain rule 1.1", "What can you do?"]
+            content: "Hello! I'm your ICT Trading Assistant, powered by AI with access to the ICT Rulebook.\n\nAsk me about:\n• ICT trading concepts and rules\n• Current market analysis\n• Strategy explanations",
+            suggestions: ["Explain Rule 1.1", "What is a kill zone?", "How to identify FVGs?"]
         }
     ]);
     const [input, setInput] = useState("");
+    const [showSources, setShowSources] = useState<number | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     // Auto-scroll to bottom when new messages arrive
@@ -32,12 +35,25 @@ export function ChatPanel({ isOpen }: ChatPanelProps) {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages]);
 
+    // Build conversation history for context
+    const getHistory = () => {
+        return messages.slice(-10).map(m => ({
+            role: m.role,
+            content: m.content
+        }));
+    };
+
     const chatMutation = useMutation({
-        mutationFn: sendChatMessage,
-        onSuccess: (data: ChatResponse) => {
+        mutationFn: (message: string) => sendAIChat(message, currentContext, getHistory()),
+        onSuccess: (data: AIChat) => {
             setMessages((prev) => [
                 ...prev,
-                { role: "assistant", content: data.message, suggestions: data.suggestions }
+                {
+                    role: "assistant",
+                    content: data.message,
+                    suggestions: data.suggestions,
+                    sources: data.sources
+                }
             ]);
         },
         onError: (error: Error) => {
@@ -53,6 +69,7 @@ export function ChatPanel({ isOpen }: ChatPanelProps) {
         if (!text.trim()) return;
         setMessages((prev) => [...prev, { role: "user", content: text }]);
         setInput("");
+        setShowSources(null);
         chatMutation.mutate(text);
     };
 
@@ -98,6 +115,38 @@ export function ChatPanel({ isOpen }: ChatPanelProps) {
                                             {suggestion}
                                         </Button>
                                     ))}
+                                </div>
+                            )}
+
+                            {/* Sources (RAG references) */}
+                            {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (
+                                <div className="ml-8">
+                                    <button
+                                        onClick={() => setShowSources(showSources === i ? null : i)}
+                                        className="flex items-center gap-1 text-[10px] text-purple-400 hover:text-purple-300"
+                                    >
+                                        <BookOpen className="w-3 h-3" />
+                                        {msg.sources.length} source{msg.sources.length > 1 ? 's' : ''}
+                                        {showSources === i ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                                    </button>
+                                    {showSources === i && (
+                                        <div className="mt-1 space-y-1">
+                                            {msg.sources.map((source, j) => (
+                                                <div key={j} className="text-[10px] bg-slate-800/50 rounded px-2 py-1">
+                                                    <div className="text-slate-400">{source.headers}</div>
+                                                    {source.rule_ids.length > 0 && (
+                                                        <div className="flex gap-1 mt-0.5">
+                                                            {source.rule_ids.map((rule, k) => (
+                                                                <span key={k} className="px-1 bg-purple-900/50 text-purple-300 rounded">
+                                                                    {rule}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>

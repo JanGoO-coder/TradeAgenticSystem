@@ -2,10 +2,10 @@
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { 
-    Calendar, 
-    Server, 
-    Clock, 
+import {
+    Calendar,
+    Server,
+    Clock,
     TrendingUp,
     Settings2,
     Database,
@@ -17,7 +17,6 @@ interface BacktestStatsBarProps {
     symbol: string;
     fromDate: string;
     toDate: string;
-    dataSource: "mt5" | "sample";
     isLoaded: boolean;
     isLoading?: boolean;
     totalBars: number;
@@ -30,7 +29,6 @@ export function BacktestStatsBar({
     symbol,
     fromDate,
     toDate,
-    dataSource,
     isLoaded,
     isLoading = false,
     totalBars,
@@ -69,16 +67,13 @@ export function BacktestStatsBar({
                         <span>{formatDate(toDate)}</span>
                     </div>
 
-                    {/* Data Source Badge */}
-                    <Badge 
-                        variant="outline" 
-                        className={dataSource === "mt5" 
-                            ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/50" 
-                            : "bg-slate-500/20 text-slate-400 border-slate-500/50"
-                        }
+                    {/* Data Source Badge - Always MT5 */}
+                    <Badge
+                        variant="outline"
+                        className="bg-emerald-500/20 text-emerald-400 border-emerald-500/50"
                     >
                         <Server className="w-3 h-3 mr-1" />
-                        {dataSource === "mt5" ? "MT5 Data" : "Sample Data"}
+                        MT5 Data
                     </Badge>
 
                     {/* Bars Count */}
@@ -94,12 +89,12 @@ export function BacktestStatsBar({
                 <div className="flex items-center gap-3">
                     {/* Session (if available) */}
                     {currentSession && (
-                        <Badge 
-                            variant="outline" 
+                        <Badge
+                            variant="outline"
                             className={
-                                currentSession === "London" 
+                                currentSession === "London"
                                     ? "bg-blue-500/20 text-blue-400 border-blue-500/50"
-                                    : currentSession === "NY" 
+                                    : currentSession === "NY"
                                         ? "bg-orange-500/20 text-orange-400 border-orange-500/50"
                                         : "bg-purple-500/20 text-purple-400 border-purple-500/50"
                             }

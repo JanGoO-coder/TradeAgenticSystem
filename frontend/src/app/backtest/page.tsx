@@ -3,13 +3,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Header } from "@/components/layout/Header";
-import { 
-    getHealth, 
-    analyzeMarket, 
-    TradeSetupResponse, 
-    getMT5Status, 
-    getMT5Symbols, 
-    connectMT5 
+import {
+    getHealth,
+    analyzeMarket,
+    TradeSetupResponse,
+    getMT5Status,
+    getMT5Symbols,
+    connectMT5
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -67,7 +67,7 @@ interface BacktestConfig {
 
 export default function BacktestPage() {
     const queryClient = useQueryClient();
-    
+
     // Config state
     const [config, setConfig] = useState<BacktestConfig>(() => ({
         symbol: "EURUSD",
@@ -79,14 +79,13 @@ export default function BacktestPage() {
         toDate: new Date().toISOString().split('T')[0],
         timeframes: ["1H", "15M", "5M"],
     }));
-    
+
     // UI state
     const [configOpen, setConfigOpen] = useState(false);
     const [selectedTimeframe, setSelectedTimeframe] = useState("1H");
     const [speed, setSpeed] = useState(1);
     const [isPlaying, setIsPlaying] = useState(false);
     const [analysisResult, setAnalysisResult] = useState<TradeSetupResponse | null>(null);
-    const [dataSource, setDataSource] = useState<"mt5" | "sample">("sample");
     const [currentSnapshot, setCurrentSnapshot] = useState<BacktestSnapshot | null>(null);
 
     // Health query
@@ -151,7 +150,7 @@ export default function BacktestPage() {
         onSuccess: (data) => {
             refetchStatus();
             setAnalysisResult(null);
-            setDataSource(data.source === "mt5" ? "mt5" : "sample");
+            // All data comes from MT5
             // Fetch initial snapshot
             fetchSnapshot();
         },
@@ -270,7 +269,7 @@ export default function BacktestPage() {
     // Auto-step when playing
     useEffect(() => {
         if (!isPlaying || !backtestStatus?.loaded || stepMutation.isPending) return;
-        
+
         const interval = setInterval(() => {
             if (backtestStatus.current_index < backtestStatus.total_bars - 1) {
                 stepMutation.mutate(1);
@@ -287,7 +286,7 @@ export default function BacktestPage() {
         const handleKeyDown = (e: KeyboardEvent) => {
             // Ignore if typing in an input
             if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-            
+
             const isLoaded = backtestStatus?.loaded;
             if (!isLoaded) return;
 
@@ -360,7 +359,6 @@ export default function BacktestPage() {
                 symbol={config.symbol}
                 fromDate={config.fromDate}
                 toDate={config.toDate}
-                dataSource={dataSource}
                 isLoaded={isLoaded}
                 isLoading={loadMutation.isPending}
                 totalBars={backtestStatus?.total_bars || 0}
@@ -385,7 +383,7 @@ export default function BacktestPage() {
                                 SIMULATION
                             </Badge>
                         </div>
-                        
+
                         {/* Keyboard shortcuts hint */}
                         <TooltipProvider>
                             <Tooltip>
@@ -422,8 +420,8 @@ export default function BacktestPage() {
 
                 {/* Analysis Panel (Right - 30%) */}
                 <div className="w-[320px] flex-shrink-0 border-l border-slate-800 bg-slate-950">
-                    <BacktestAnalysisPanel 
-                        analysis={analysisResult} 
+                    <BacktestAnalysisPanel
+                        analysis={analysisResult}
                         className="h-full"
                     />
                 </div>

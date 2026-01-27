@@ -54,19 +54,22 @@ npm run dev
 
 ## 📊 Data Modes
 
+All data modes use MT5 (MetaTrader 5) as the data source:
+
 | Mode | Description |
 |------|-------------|
-| **Sample** | Synthetic data for development |
-| **Historical** | MT5 historical fetch |
-| **Backtest** | Simulated playback |
-| **Live** | Real-time MT5 stream |
+| **Historical** | MT5 historical data fetch for one-time analysis |
+| **Backtest** | MT5 data playback for strategy testing |
+| **Live** | Real-time MT5 stream for production trading |
+
+> **Note:** MetaTrader 5 terminal must be running for all data features to work.
 
 ## 🛠️ Tech Stack
 
 - **Agent:** LangGraph, LangChain
 - **Backend:** FastAPI, Pydantic, WebSockets
 - **Frontend:** Next.js 14, React Query, Tailwind CSS
-- **Data:** MetaTrader 5 (optional)
+- **Data:** MetaTrader 5 (required)
 
 ## 📁 Key Files
 

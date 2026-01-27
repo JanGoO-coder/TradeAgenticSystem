@@ -19,7 +19,7 @@ export function ResizableLayout({ children }: ResizableLayoutProps) {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        <div className="flex-1 overflow-hidden">
+        <div className="flex-1 overflow-auto">
           {children}
         </div>
 

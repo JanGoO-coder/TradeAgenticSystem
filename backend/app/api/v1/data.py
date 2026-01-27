@@ -40,12 +40,11 @@ async def update_data_config(config: DataConfig) -> DataConfig:
 
 @router.get("/modes")
 async def get_available_modes() -> dict:
-    """Get available data modes with descriptions."""
+    """Get available data modes with descriptions. All modes use MT5 data."""
     return {
         "modes": [
-            {"value": "SAMPLE", "label": "Sample", "description": "Generated synthetic data for development/testing"},
             {"value": "HISTORICAL", "label": "Historical", "description": "MT5 historical data fetch for one-time analysis"},
-            {"value": "BACKTEST", "label": "Backtest", "description": "Simulated playback for strategy testing"},
+            {"value": "BACKTEST", "label": "Backtest", "description": "MT5 data playback for strategy testing"},
             {"value": "LIVE", "label": "Live", "description": "Real-time MT5 stream for production trading"},
         ]
     }

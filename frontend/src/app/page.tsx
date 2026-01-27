@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Header } from "@/components/layout/Header";
 import { SessionClock } from "@/components/dashboard/SessionClock";
 import { BiasCard } from "@/components/dashboard/BiasCard";
@@ -12,65 +12,14 @@ import { TradingPairSelector } from "@/components/dashboard/TradingPairSelector"
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { getHealth, getSession, analyzeMarket, getDataConfig, TradeSetupResponse, DataConfig } from "@/lib/api";
-import { Play, Loader2 } from "lucide-react";
-
-// Generate sample market data that varies by symbol and uses config
-const createSampleMarketData = (symbol: string, config?: DataConfig) => {
-  // Use symbol to create consistent but different data per pair
-  const seed = symbol.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  const basePrice = symbol.includes('JPY') ? 150.0 : symbol.includes('XAU') ? 2000.0 : symbol.includes('BTC') ? 45000.0 : 1.08;
-  const volatility = symbol.includes('XAU') ? 0.005 : symbol.includes('BTC') ? 0.02 : 0.002;
-
-  // Use config bar counts or defaults
-  const htfBars = config?.htf_bars || 50;
-  const ltfBars = config?.ltf_bars || 100;
-  const microBars = config?.micro_bars || 50;
-
-  // Generate varying OHLC based on symbol
-  const generateBars = (count: number, tf: string) => {
-    const bars = [];
-    let price = basePrice;
-    const trendDirection = (seed % 3) - 1; // -1, 0, or 1
-
-    for (let i = 0; i < count; i++) {
-      const change = (Math.sin(seed + i) * volatility) + (trendDirection * volatility * 0.3);
-      const high = price * (1 + Math.abs(change) + volatility * 0.5);
-      const low = price * (1 - Math.abs(change) - volatility * 0.5);
-      const close = price * (1 + change);
-
-      bars.push({
-        timestamp: new Date(Date.now() - (count - i) * (tf === "1H" ? 3600000 : tf === "15M" ? 900000 : 300000)).toISOString(),
-        open: Number(price.toFixed(5)),
-        high: Number(high.toFixed(5)),
-        low: Number(low.toFixed(5)),
-        close: Number(close.toFixed(5)),
-        volume: 1000 + (seed % 500) + i * 100
-      });
-
-      price = close;
-    }
-    return bars;
-  };
-
-  return {
-    symbol,
-    timestamp: new Date().toISOString(),
-    timeframe_bars: {
-      "1H": generateBars(htfBars, "1H"),
-      "15M": generateBars(ltfBars, "15M"),
-      "5M": generateBars(microBars, "5M")
-    },
-    account_balance: 10000.0,
-    risk_pct: 1.0,
-    economic_calendar: []
-  };
-};
+import { getHealth, getSession, analyzeMarket, getDataConfig, TradeSetupResponse, DataConfig, createMT5MarketData, getMT5Status, connectMT5 } from "@/lib/api";
+import { Play, Loader2, AlertCircle } from "lucide-react";
 
 export default function Dashboard() {
   const [selectedPair, setSelectedPair] = useState("EURUSD");
   const [currentSetup, setCurrentSetup] = useState<TradeSetupResponse | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   // Clear analysis when pair changes
   useEffect(() => {
@@ -96,8 +45,28 @@ export default function Dashboard() {
     staleTime: 30000,
   });
 
+  // MT5 Status query
+  const { data: mt5Status } = useQuery({
+    queryKey: ["mt5Status"],
+    queryFn: getMT5Status,
+    refetchInterval: 10000,
+  });
+
+  // Auto-connect to MT5 on page load
+  useEffect(() => {
+    if (mt5Status?.available && !mt5Status?.connected) {
+      connectMT5().then(() => {
+        queryClient.invalidateQueries({ queryKey: ["mt5Status"] });
+      }).catch(() => {});
+    }
+  }, [mt5Status?.available, mt5Status?.connected, queryClient]);
+
   const analyzeMutation = useMutation({
-    mutationFn: () => analyzeMarket(createSampleMarketData(selectedPair, dataConfig)),
+    mutationFn: async () => {
+      // Fetch real MT5 data instead of sample data
+      const marketData = await createMT5MarketData(selectedPair, dataConfig);
+      return analyzeMarket(marketData);
+    },
     onSuccess: (data) => {
       setCurrentSetup(data);
       setAnalysisError(null);
@@ -107,14 +76,16 @@ export default function Dashboard() {
     },
   });
 
+  const isMT5Connected = mt5Status?.connected ?? false;
+
   return (
-    <div className="flex flex-col h-full w-full overflow-hidden">
+    <div className="flex flex-col h-full w-full">
       <Header
         mode={health?.mode || "ANALYSIS_ONLY"}
         agentAvailable={health?.agent_available || false}
       />
 
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-4 min-w-0">
           {/* Quick Actions */}
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -129,7 +100,7 @@ export default function Dashboard() {
             <Button
               onClick={() => analyzeMutation.mutate()}
               className="bg-emerald-600 hover:bg-emerald-700"
-              disabled={analyzeMutation.isPending}
+              disabled={analyzeMutation.isPending || !isMT5Connected}
               size="sm"
             >
               {analyzeMutation.isPending ? (
@@ -145,6 +116,14 @@ export default function Dashboard() {
               )}
             </Button>
           </div>
+
+          {/* MT5 Connection Warning */}
+          {!isMT5Connected && (
+            <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg flex items-center gap-2 text-yellow-400 text-sm">
+              <AlertCircle className="w-4 h-4" />
+              <span>MT5 not connected. Ensure MetaTrader 5 is running to analyze live market data.</span>
+            </div>
+          )}
 
           {/* Current Analysis Info */}
           {currentSetup && (

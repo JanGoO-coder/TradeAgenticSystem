@@ -12,7 +12,6 @@ interface HeaderProps {
 }
 
 const dataModeStyles: Record<string, { bg: string; text: string; border: string; pulse?: boolean }> = {
-    SAMPLE: { bg: "bg-blue-500/20", text: "text-blue-400", border: "border-blue-500/50" },
     HISTORICAL: { bg: "bg-green-500/20", text: "text-green-400", border: "border-green-500/50" },
     BACKTEST: { bg: "bg-yellow-500/20", text: "text-yellow-400", border: "border-yellow-500/50" },
     LIVE: { bg: "bg-red-500/20", text: "text-red-400", border: "border-red-500/50", pulse: true },
@@ -25,8 +24,8 @@ export function Header({ mode, agentAvailable }: HeaderProps) {
         staleTime: 30000,
     });
 
-    const dataMode = dataConfig?.data_mode || "SAMPLE";
-    const dataModeStyle = dataModeStyles[dataMode] || dataModeStyles.SAMPLE;
+    const dataMode = dataConfig?.data_mode || "HISTORICAL";
+    const dataModeStyle = dataModeStyles[dataMode] || dataModeStyles.HISTORICAL;
 
     const getModeColor = (mode: string) => {
         switch (mode) {
@@ -87,4 +86,3 @@ export function Header({ mode, agentAvailable }: HeaderProps) {
         </header>
     );
 }
-

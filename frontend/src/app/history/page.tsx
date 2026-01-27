@@ -130,9 +130,9 @@ export default function HistoryPage() {
     const { data: trades } = useQuery({ queryKey: ["trades"], queryFn: getSimulatedTrades, refetchInterval: 5000 });
 
     return (
-        <div className="flex flex-col h-full w-full overflow-hidden">
+        <div className="flex flex-col h-full w-full">
             <Header mode={health?.mode || "ANALYSIS_ONLY"} agentAvailable={health?.agent_available || false} />
-            <ScrollArea className="flex-1">
+            <ScrollArea className="flex-1 min-h-0">
                 <div className="p-4 min-w-0">
                     <div className="flex items-center gap-3 mb-4">
                         <HistoryIcon className="w-5 h-5 text-slate-400" />
