@@ -16,6 +16,7 @@ from app.core.config import get_settings
 from app.services.mt5_service import get_mt5_service
 from app.agent.main_agent import get_main_agent, MainAgent
 from app.tools.observer import run_all_observations, MarketObservation
+from app.tools.breakout import run_breakout_observation, BreakoutObservation
 from app.domain.backtest import (
     BacktestSession,
     BacktestDecision,
@@ -423,6 +424,127 @@ class SmartBacktestService:
 
         return observation, decision
 
+    async def analyze_breakout_at_index(
+        self,
+        index: int,
+        mode: str = "concise",
+        force: bool = False
+    ) -> tuple[BreakoutObservation, BacktestDecision]:
+        """
+        Run Simple Breakout Strategy analysis at a specific index.
+
+        Uses 5-minute candles to detect breakouts:
+        - Break above previous candle high → SHORT
+        - Break below previous candle low → LONG
+
+        Args:
+            index: Candle index to analyze (on 5M timeframe)
+            mode: "verbose" or "concise"
+            force: Force analysis even if state hasn't changed
+
+        Returns:
+            Tuple of (BreakoutObservation, BacktestDecision)
+        """
+        await self.initialize()
+        session = self._session
+
+        if not session:
+            raise ValueError("No active session")
+
+        # Get 5M candles at this point in time
+        micro_data = self._data.get("5M", [])
+
+        if not micro_data or index >= len(micro_data):
+            raise ValueError(f"No 5M data at index {index}")
+
+        # Get last few 5M candles (need at least 2 for breakout detection)
+        lookback = min(index + 1, 10)  # Last 10 candles max
+        candles_5m = micro_data[max(0, index - lookback + 1):index + 1]
+
+        if len(candles_5m) < 2:
+            raise ValueError(f"Need at least 2 candles for breakout detection")
+
+        # Get timestamp from current candle
+        current_candle = candles_5m[-1]
+        time_str = current_candle["time"]
+
+        # Clean up timezone string
+        if time_str.endswith("Z"):
+            time_str = time_str[:-1]
+        if "+00:00" in time_str:
+            time_str = time_str.split("+")[0]
+
+        try:
+            timestamp = datetime.fromisoformat(time_str)
+        except ValueError as e:
+            logger.warning(f"Could not parse timestamp {time_str}: {e}")
+            timestamp = datetime.now()
+
+        current_price = current_candle.get("close", 0)
+
+        # Run breakout observation
+        observation = run_breakout_observation(
+            symbol=session.symbol,
+            timestamp=timestamp,
+            current_price=current_price,
+            candles_5m=candles_5m
+        )
+
+        # Check if state changed (selective analysis)
+        if not force and self.settings.backtest_selective_mode:
+            if observation.state_hash == session.last_state_hash:
+                # Skip analysis, return cached decision
+                last_decision = session.decisions[-1] if session.decisions else None
+
+                decision = BacktestDecision(
+                    index=index,
+                    timestamp=timestamp,
+                    decision=last_decision.decision if last_decision else "WAIT",
+                    confidence=last_decision.confidence if last_decision else 0.0,
+                    brief_reason="State unchanged - using previous decision",
+                    rule_citations=last_decision.rule_citations if last_decision else [],
+                    observation_hash=observation.state_hash,
+                    price_at_decision=observation.current_price,
+                    skipped=True
+                )
+
+                session.add_decision(decision)
+                return observation, decision
+
+        # Run agent analysis using breakout method
+        _, agent_decision = await self._agent.analyze_breakout(
+            symbol=session.symbol,
+            timestamp=timestamp,
+            current_price=current_price,
+            candles_5m=candles_5m,
+            mode=mode
+        )
+
+        # Convert to backtest decision
+        decision = BacktestDecision(
+            index=index,
+            timestamp=timestamp,
+            decision=agent_decision.decision,
+            confidence=agent_decision.confidence,
+            brief_reason=agent_decision.brief_reason,
+            rule_citations=agent_decision.rule_citations,
+            setup=agent_decision.setup,
+            observation_hash=observation.state_hash,
+            price_at_decision=observation.current_price,
+            latency_ms=agent_decision.latency_ms,
+            skipped=False
+        )
+
+        # Update session
+        session.last_state_hash = observation.state_hash
+        session.add_decision(decision)
+
+        # Handle trade setup
+        if decision.decision == "TRADE" and decision.setup:
+            await self._open_trade(decision, session)
+
+        return observation, decision
+
     async def _open_trade(self, decision: BacktestDecision, session: BacktestSession):
         """Open a new trade based on agent decision."""
         setup = decision.setup
@@ -627,6 +749,197 @@ class SmartBacktestService:
             session.status = "ERROR"
             yield {"event": "error", "error": str(e)}
             raise
+
+    async def run_breakout_batch(
+        self,
+        step_size: int = 1,
+        max_concurrent: int = 10
+    ) -> AsyncGenerator[Dict, None]:
+        """
+        Run batch backtest for Simple Breakout Strategy with progress streaming.
+
+        Uses 5-minute candles to detect breakouts:
+        - Break above previous candle high → SHORT
+        - Break below previous candle low → LONG
+
+        Args:
+            step_size: Candles to advance per step (on 5M timeframe)
+            max_concurrent: Max parallel agent calls
+
+        Yields:
+            Progress updates and results
+        """
+        await self.initialize()
+        session = self._session
+
+        if not session:
+            yield {"error": "No active session"}
+            return
+
+        # Ensure 5M data is loaded
+        micro_data = self._data.get("5M", [])
+        if not micro_data:
+            yield {"error": "No 5M data loaded. Load data with 5M timeframe."}
+            return
+
+        total_5m_candles = len(micro_data)
+
+        session.status = "RUNNING"
+        session.started_at = datetime.utcnow()
+
+        yield {
+            "event": "started",
+            "session_id": session.session_id,
+            "total_candles": total_5m_candles,
+            "strategy": "Simple Breakout Strategy"
+        }
+
+        try:
+            index = 2  # Start after at least 2 candles (need previous candle)
+
+            while index < total_5m_candles:
+                # Check for trade exits first using 5M candles
+                closed = self._check_breakout_trade_exits(index, micro_data)
+
+                if closed:
+                    yield {
+                        "event": "trades_closed",
+                        "index": index,
+                        "trades": [t.to_dict() for t in closed]
+                    }
+
+                # Run breakout analysis
+                try:
+                    observation, decision = await self.analyze_breakout_at_index(
+                        index, mode="concise"
+                    )
+
+                    # Update progress based on 5M index
+                    session.current_index = index
+                    session.progress = (index / total_5m_candles) * 100
+
+                    # Yield progress every 10 candles or on TRADE decisions
+                    if index % 10 == 0 or decision.decision == "TRADE":
+                        yield {
+                            "event": "progress",
+                            "index": index,
+                            "progress": session.progress,
+                            "decision": decision.decision,
+                            "skipped": decision.skipped,
+                            "total_decisions": len(session.decisions),
+                            "total_trades": len(session.trades),
+                            "breakout_detected": observation.breakout_detected,
+                            "session_valid": observation.session_valid
+                        }
+
+                except Exception as e:
+                    logger.error(f"Error at index {index}: {e}")
+                    yield {"event": "error", "index": index, "error": str(e)}
+
+                index += step_size
+
+                # Rate limiting - small delay between calls
+                await asyncio.sleep(0.01)
+
+            # Close any remaining open trades
+            for trade in session.trades:
+                if trade.result == TradeResult.OPEN:
+                    last_candle = micro_data[-1]
+                    time_str = last_candle["time"]
+                    if time_str.endswith("Z"):
+                        time_str = time_str[:-1]
+                    if "+00:00" in time_str:
+                        time_str = time_str.split("+")[0]
+                    try:
+                        timestamp = datetime.fromisoformat(time_str)
+                    except ValueError:
+                        timestamp = datetime.now()
+                    trade.calculate_result(
+                        last_candle["close"],
+                        total_5m_candles - 1,
+                        timestamp,
+                        "END_OF_DATA"
+                    )
+
+            # Finalize session
+            session.finalize()
+
+            # Save session
+            path = self.save_session(session)
+
+            yield {
+                "event": "completed",
+                "session_id": session.session_id,
+                "performance": session.performance.to_dict(),
+                "saved_to": path
+            }
+
+        except Exception as e:
+            session.status = "ERROR"
+            yield {"event": "error", "error": str(e)}
+            raise
+
+    def _check_breakout_trade_exits(self, index: int, micro_data: List[Dict]) -> List[BacktestTrade]:
+        """
+        Check if any open trades have hit TP/SL using 5M candles.
+
+        Args:
+            index: Current 5M candle index
+            micro_data: 5M candle data
+
+        Returns:
+            List of trades that were closed
+        """
+        session = self._session
+        if not session or index >= len(micro_data):
+            return []
+
+        current_candle = micro_data[index]
+        high = current_candle["high"]
+        low = current_candle["low"]
+
+        # Parse timestamp safely
+        time_str = current_candle["time"]
+        if time_str.endswith("Z"):
+            time_str = time_str[:-1]
+        if "+00:00" in time_str:
+            time_str = time_str.split("+")[0]
+        try:
+            timestamp = datetime.fromisoformat(time_str)
+        except ValueError:
+            timestamp = datetime.now()
+
+        closed_trades = []
+
+        for trade in session.trades:
+            if trade.result != TradeResult.OPEN:
+                continue
+
+            if trade.direction == "LONG":
+                # Check SL first (conservative)
+                if low <= trade.stop_loss:
+                    trade.calculate_result(
+                        trade.stop_loss, index, timestamp, "SL_HIT"
+                    )
+                    closed_trades.append(trade)
+                elif high >= trade.take_profit:
+                    trade.calculate_result(
+                        trade.take_profit, index, timestamp, "TP_HIT"
+                    )
+                    closed_trades.append(trade)
+            else:  # SHORT
+                if high >= trade.stop_loss:
+                    trade.calculate_result(
+                        trade.stop_loss, index, timestamp, "SL_HIT"
+                    )
+                    closed_trades.append(trade)
+                elif low <= trade.take_profit:
+                    trade.calculate_result(
+                        trade.take_profit, index, timestamp, "TP_HIT"
+                    )
+                    closed_trades.append(trade)
+
+        return closed_trades
 
     # =========================================================================
     # Interactive Mode

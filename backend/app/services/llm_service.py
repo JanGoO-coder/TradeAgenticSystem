@@ -32,7 +32,7 @@ class GroqService:
         # Configure Groq API
         self.client = Groq(api_key=settings.groq_api_key)
         self.model = settings.groq_model
-        
+
         # Gemini for embeddings (optional)
         self.embedding_model = settings.gemini_embedding_model
         self._gemini_configured = False
@@ -151,9 +151,9 @@ class GroqService:
                     stream=True,
                     stop=None
                 )
-            
+
             completion = await asyncio.to_thread(stream_sync)
-            
+
             for chunk in completion:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
@@ -173,7 +173,7 @@ class GroqService:
         if not self._gemini_configured:
             print("Warning: Gemini not configured for embeddings")
             return [[0.0] * 3072 for _ in texts]
-            
+
         embeddings = []
 
         for text in texts:
@@ -199,7 +199,7 @@ class GroqService:
         if not self._gemini_configured:
             print("Warning: Gemini not configured for embeddings")
             return [0.0] * 3072
-            
+
         async with self.limiter:
             try:
                 result = await asyncio.to_thread(
@@ -257,16 +257,16 @@ class GroqService:
 You must respond ONLY with valid JSON. No markdown, no explanation, no code blocks.
 Use this exact format:
 
-{"decision": "WAIT", "confidence": 0.7, "rule_citations": ["1.1", "6.5"], "setup": null, "brief_reason": "Waiting for liquidity sweep"}
+{"decision": "WAIT", "confidence": 0.7, "rule_citations": ["1.1", "1.2"], "setup": null, "brief_reason": "Waiting for candle close to confirm break"}
 
 Fields:
 - decision: Must be exactly "TRADE", "WAIT", or "NO_TRADE"
 - confidence: Number between 0.0 and 1.0
-- rule_citations: Array of rule IDs like ["1.1", "6.5", "8.1"] - use numbers only, not prices
+- rule_citations: Array of rule IDs like ["1.1", "1.2", "1.3"] - use numbers only, not prices
 - setup: null OR {"direction": "LONG" or "SHORT", "entry": number, "stop_loss": number, "take_profit": number}
 - brief_reason: Short explanation string
 
-Important: rule_citations should be ICT rule numbers (e.g., "1.1", "6.5", "8.1"), NOT price levels.
+Important: rule_citations should be rule numbers from the strategy (e.g., "1.1", "1.2", "1.3"), NOT price levels.
 """
         parts = []
         if system_instruction:
@@ -281,12 +281,11 @@ Important: rule_citations should be ICT rule numbers (e.g., "1.1", "6.5", "8.1")
         cot_instruction = """
 Think through this step by step:
 
-1. **Market Structure Analysis**: What is the current structure telling us?
-2. **Liquidity Assessment**: Where has liquidity been taken or is resting?
-3. **PD Array Alignment**: Are we in premium or discount for the bias?
-4. **Session Context**: Is this a valid trading window?
-5. **Strategy Match**: Which strategy rules apply here?
-6. **Decision**: Based on the above, what is the trading decision?
+1. **5-Minute Candle Analysis**: Check the current and previous 5-minute candle
+2. **Breakout Check**: Did the current candle break the previous candle's high or low?
+3. **Session Context**: Is this a valid trading session (London/New York)? Asian session is invalid.
+4. **Entry Direction**: Break of high = SHORT, Break of low = LONG
+5. **Decision**: Based on the above, what is the trading decision?
 
 After your reasoning, provide a summary in this JSON format:
 ```json
@@ -299,7 +298,7 @@ After your reasoning, provide a summary in this JSON format:
 }
 ```
 
-Important: rule_citations should be ICT rule numbers (e.g., "1.1", "6.5", "8.1"), NOT price levels.
+Important: rule_citations should be rule numbers from the strategy (e.g., "1.1", "1.2", "1.3"), NOT price levels.
 """
         parts = []
         if system_instruction:

@@ -1,5 +1,5 @@
 """
-ICT Trading System - Observation Tools.
+Trading System - Observation Tools.
 
 Pure observation functions that analyze market data and return factual observations.
 These tools are the "eyes" of the agent - they observe and report, never decide.
@@ -37,6 +37,12 @@ from app.tools.observer import (
     compute_state_hash,
     MarketObservation
 )
+from app.tools.breakout import (
+    run_breakout_observation,
+    BreakoutObservation,
+    detect_breakout,
+    get_breakout_entry_exit
+)
 
 __all__ = [
     # Structure
@@ -65,5 +71,10 @@ __all__ = [
     # Aggregator
     "run_all_observations",
     "compute_state_hash",
-    "MarketObservation"
+    "MarketObservation",
+    # Simple Breakout Strategy
+    "run_breakout_observation",
+    "BreakoutObservation",
+    "detect_breakout",
+    "get_breakout_entry_exit"
 ]

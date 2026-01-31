@@ -305,6 +305,91 @@ async def run_batch_backtest(request: RunBatchRequest = RunBatchRequest()):
     )
 
 
+@router.post("/run/breakout")
+async def run_breakout_backtest(request: RunBatchRequest = RunBatchRequest()):
+    """
+    Run batch backtest using the Simple Breakout Strategy with streaming progress.
+
+    This strategy uses 5-minute candles:
+    - If current candle CLOSES above previous candle HIGH → Go SHORT
+    - If current candle CLOSES below previous candle LOW → Go LONG
+    - Only valid during London/New York sessions (NOT Asian)
+
+    Returns a stream of JSON events:
+    - started: Session started with strategy info
+    - progress: Current position, breakout detection, session validity
+    - trades_closed: Trades that hit TP/SL
+    - completed: Final results
+    - error: Error occurred
+    """
+    async def event_stream():
+        service = await get_smart_backtest_service()
+
+        async for event in service.run_breakout_batch(
+            step_size=request.step_size,
+            max_concurrent=request.max_concurrent
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+            await asyncio.sleep(0.01)  # Small delay for buffering
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream"
+    )
+
+
+@router.post("/analyze/breakout")
+async def analyze_breakout_at_current(
+    mode: str = Query("verbose", description="verbose or concise")
+) -> dict:
+    """
+    Run Simple Breakout Strategy analysis at current position.
+
+    Uses 5-minute candles to detect:
+    - Break above previous candle high → SHORT signal
+    - Break below previous candle low → LONG signal
+    """
+    try:
+        service = await get_smart_backtest_service()
+        session = service.get_session()
+
+        if not session:
+            raise HTTPException(status_code=400, detail="No active session")
+
+        # Use 5M data for breakout analysis
+        micro_data = service._data.get("5M", [])
+        if not micro_data:
+            raise HTTPException(status_code=400, detail="No 5M data available")
+
+        # Map current LTF index to approximate 5M index
+        ltf_per_5m = 3  # 15M / 5M
+        micro_index = min(session.current_index * ltf_per_5m, len(micro_data) - 1)
+
+        observation, decision = await service.analyze_breakout_at_index(
+            micro_index,
+            mode=mode,
+            force=True
+        )
+
+        return {
+            "observation": observation.to_summary(),
+            "observation_hash": observation.state_hash,
+            "breakout_detected": observation.breakout_detected,
+            "breakout_direction": observation.breakout_direction,
+            "session": observation.session,
+            "session_valid": observation.session_valid,
+            "previous_candle": observation.previous_candle,
+            "current_candle": observation.current_candle,
+            "decision": decision.to_dict()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================================
 # Results
 # ============================================================================

@@ -18,6 +18,11 @@ from app.core.config import get_settings
 from app.services.llm_service import get_gemini_service, GeminiService
 from app.services.strategy_store import get_strategy_store, StrategyStore
 from app.tools.observer import MarketObservation, run_all_observations
+from app.tools.breakout import (
+    BreakoutObservation,
+    run_breakout_observation,
+    get_breakout_entry_exit
+)
 
 
 @dataclass
@@ -77,27 +82,27 @@ class MainAgent:
     SYSTEM_INSTRUCTION = """You are an expert ICT (Inner Circle Trader) analyst.
 
 Your role is to analyze market observations and determine if trading conditions align
-with the provided ICT strategies and rules.
+with the provided trading strategies and rules.
 
 You must:
 1. Carefully review the market observations provided
 2. Consider the relevant strategy rules retrieved for this context
 3. Reason about whether conditions meet the criteria for a trade
-4. Be conservative - only recommend trades when multiple confluences align
+4. Be conservative - only recommend trades when the setup is clear
 5. Always cite specific rule numbers when making decisions
 
-Key ICT Concepts to consider:
-- Higher Timeframe (HTF) bias must be clear
-- Lower Timeframe (LTF) must align with HTF
-- Liquidity must be swept before entries
-- Entries should be at premium/discount levels or PD arrays (FVG, OB)
-- Kill zones are preferred trading windows
-- Risk management is paramount
+Simple Breakout Strategy (Current Active Rules):
+- Rule 1.1: If 5-min candle breaks previous candle HIGH → Go SHORT
+- Rule 1.1: If 5-min candle breaks previous candle LOW → Go LONG
+- Rule 1.2: Entry conditions - wait for candle close, confirm break
+- Rule 1.3: Exit conditions - stop loss and take profit placement
+- Valid only during active sessions (London, New York)
+- Invalid during low volatility (Asian session)
 
 Decision Guidelines:
-- TRADE: Clear bias, multiple confluences, liquidity taken, valid entry level
-- WAIT: Bias exists but setup not complete, or waiting for liquidity sweep
-- NO_TRADE: No clear bias, conflicting signals, outside kill zone with no setup"""
+- TRADE: Clear break of previous candle high/low with candle close confirmation
+- WAIT: Waiting for candle to close or for active session
+- NO_TRADE: No clear break, or during invalid trading period (Asian session)"""
 
     def __init__(self):
         self.settings = get_settings()
@@ -202,6 +207,166 @@ Decision Guidelines:
 
         return observation, decision
 
+    async def analyze_breakout(
+        self,
+        symbol: str,
+        timestamp: datetime,
+        current_price: float,
+        candles_5m: List[dict],
+        mode: Optional[Literal["verbose", "concise"]] = None
+    ) -> tuple[BreakoutObservation, AgentDecision]:
+        """
+        Analyze market for Simple Breakout Strategy.
+
+        This uses the simplified breakout observation that only looks at:
+        - Previous and current 5-min candle data
+        - Session context (London/NY valid, Asian invalid)
+        - Breakout detection (break of high = SHORT, break of low = LONG)
+
+        Args:
+            symbol: Trading symbol (e.g., "EURUSD")
+            timestamp: Current timestamp
+            current_price: Current market price
+            candles_5m: List of 5-minute candles, most recent last
+            mode: Reasoning mode ("verbose" or "concise")
+
+        Returns:
+            Tuple of (BreakoutObservation, AgentDecision)
+        """
+        await self.initialize()
+
+        start_time = datetime.utcnow()
+        mode = mode or self.settings.reasoning_mode
+
+        # Step 1: Run breakout observation
+        observation = run_breakout_observation(
+            symbol=symbol,
+            timestamp=timestamp,
+            current_price=current_price,
+            candles_5m=candles_5m
+        )
+
+        # Step 2: Retrieve relevant strategies
+        market_summary = observation.to_summary()
+        strategy_context = await self.strategy_store.get_strategies_for_context(
+            market_summary,
+            k=3
+        )
+
+        # Step 3: Build prompt
+        prompt = self._build_breakout_prompt(observation, strategy_context)
+
+        # Step 4: Call LLM
+        response = await self.gemini.generate(
+            prompt=prompt,
+            mode=mode,
+            system_instruction=self.SYSTEM_INSTRUCTION,
+            temperature=0.3
+        )
+
+        end_time = datetime.utcnow()
+        latency_ms = int((end_time - start_time).total_seconds() * 1000)
+
+        # Step 5: Parse response
+        decision = self._parse_breakout_response(response, observation, mode, latency_ms)
+        decision.strategy_context = strategy_context[:500]
+
+        return observation, decision
+
+    def _build_breakout_prompt(
+        self,
+        observation: BreakoutObservation,
+        strategy_context: str
+    ) -> str:
+        """Build the analysis prompt for the breakout strategy."""
+
+        prompt_parts = [
+            "# Simple Breakout Strategy Analysis",
+            "",
+            f"**Symbol**: {observation.symbol}",
+            f"**Time**: {observation.timestamp.strftime('%Y-%m-%d %H:%M')} UTC",
+            f"**Current Price**: {observation.current_price:.5f}",
+            "",
+            "---",
+            "",
+            "## Market Observations",
+            "",
+            observation.to_summary(),
+            "",
+            "---",
+            "",
+            "## Strategy Rules",
+            "",
+            strategy_context,
+            "",
+            "---",
+            "",
+            "## Your Task",
+            "",
+            "Based on the observations above:",
+            "",
+            "1. Check if the current 5-min candle has CLOSED above the previous candle HIGH (→ SHORT)",
+            "2. Check if the current 5-min candle has CLOSED below the previous candle LOW (→ LONG)",
+            "3. Verify the session is valid (London/New York - NOT Asian)",
+            "4. Make a decision: TRADE, WAIT, or NO_TRADE",
+            "",
+            "If TRADE, provide entry at current price, stop loss, and take profit.",
+            "",
+        ]
+
+        return "\n".join(prompt_parts)
+
+    def _parse_breakout_response(
+        self,
+        response: dict,
+        observation: BreakoutObservation,
+        mode: str,
+        latency_ms: int
+    ) -> AgentDecision:
+        """Parse LLM response for breakout strategy."""
+
+        content = response.get("content", "")
+        parsed = response.get("parsed")
+
+        # Default decision
+        decision = AgentDecision(
+            decision="NO_TRADE",
+            confidence=0.0,
+            observation_hash=observation.state_hash,
+            latency_ms=latency_ms,
+            mode=mode
+        )
+
+        if parsed:
+            decision.decision = parsed.get("decision", "NO_TRADE")
+            decision.confidence = float(parsed.get("confidence", 0.0))
+
+            # Filter rule citations
+            raw_citations = parsed.get("rule_citations", [])
+            valid_citations = []
+            for citation in raw_citations:
+                if isinstance(citation, str):
+                    import re
+                    if re.match(r'^\d+\.\d+$', citation):
+                        valid_citations.append(citation)
+
+            decision.rule_citations = valid_citations
+            decision.setup = parsed.get("setup")
+            decision.brief_reason = parsed.get("brief_reason", "")
+
+            # Auto-generate setup if breakout detected and decision is TRADE
+            if decision.decision == "TRADE" and observation.breakout_detected and not decision.setup:
+                decision.setup = get_breakout_entry_exit(
+                    direction=observation.breakout_direction,
+                    entry_price=observation.current_price,
+                    prev_candle=observation.previous_candle
+                )
+
+        if mode == "verbose":
+            decision.reasoning = content
+
+        return decision
+
     def _build_prompt(
         self,
         observation: MarketObservation,
@@ -234,8 +399,8 @@ Decision Guidelines:
             "",
             "Based on the observations above and the strategy rules provided:",
             "",
-            "1. Analyze whether the current market conditions align with any trading setup",
-            "2. Consider all confluences: bias, structure, liquidity, PD arrays, session",
+            "1. Analyze whether the current market conditions align with the breakout strategy",
+            "2. Check if 5-min candle breaks previous candle high (SHORT) or low (LONG)",
             "3. Make a decision: TRADE, WAIT, or NO_TRADE",
             "4. If TRADE, provide specific entry, stop loss, and take profit levels",
             "5. Cite the specific rule numbers that support your decision",
@@ -339,10 +504,10 @@ The market conditions were:
 {observation.to_summary()}
 
 Explain step by step:
-1. What the market structure shows
-2. What liquidity conditions were present
-3. What PD arrays (FVGs, OBs) were relevant
-4. Why this decision aligns (or doesn't align) with ICT methodology
+1. What the 5-minute candle structure shows
+2. Whether the previous candle high/low was broken
+3. Whether we are in a valid trading session (London/New York)
+4. Why this decision aligns (or doesn't align) with the Simple Breakout Strategy
 """
 
         response = await self.gemini.generate(

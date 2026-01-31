@@ -89,8 +89,11 @@ class StrategyStore:
             strategies_path.mkdir(parents=True, exist_ok=True)
             return
 
-        # Find all .md files
-        md_files = list(strategies_path.rglob("*.md"))
+        # Find all .md files (exclude backup folders)
+        md_files = [
+            f for f in strategies_path.rglob("*.md")
+            if "backup" not in f.parts and ".backups" not in f.parts
+        ]
 
         if not md_files:
             print(f"No .md files found in {strategies_path}")
@@ -129,7 +132,11 @@ class StrategyStore:
         Clears existing collection and re-embeds all documents.
         """
         strategies_path = Path(self.settings.strategies_dir)
-        md_files = list(strategies_path.rglob("*.md"))
+        # Exclude backup folders
+        md_files = [
+            f for f in strategies_path.rglob("*.md")
+            if "backup" not in f.parts and ".backups" not in f.parts
+        ]
 
         if not md_files:
             return

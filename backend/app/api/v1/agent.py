@@ -275,6 +275,178 @@ async def reindex_all_strategies() -> dict:
 
 
 # ============================================================================
+# Simple Breakout Strategy Endpoints
+# ============================================================================
+
+class BreakoutAnalyzeRequest(BaseModel):
+    """Request for simple breakout strategy analysis."""
+    symbol: str = Field(..., description="Trading symbol (e.g., EURUSD)")
+    candles_5m: List[dict] = Field(..., description="5-minute candles, most recent last. Each candle: {open, high, low, close, time}")
+    timestamp: Optional[datetime] = Field(None, description="Analysis timestamp (defaults to now)")
+    current_price: Optional[float] = Field(None, description="Current price (defaults to last candle close)")
+    mode: Literal["verbose", "concise"] = Field("verbose", description="Reasoning mode")
+
+
+class BreakoutObservationResponse(BaseModel):
+    """Breakout observation response."""
+    symbol: str
+    timestamp: str
+    current_price: float
+    summary: str
+    state_hash: str
+
+    # Candle data
+    previous_candle: dict
+    current_candle: dict
+
+    # Breakout detection
+    breakout_detected: bool
+    breakout_direction: Optional[str]
+    breakout_level: Optional[float]
+
+    # Session
+    session: str
+    session_valid: bool
+
+
+class BreakoutAnalysisResponse(BaseModel):
+    """Complete breakout analysis response."""
+    observation: BreakoutObservationResponse
+    decision: DecisionResponse
+
+
+@router.post("/analyze/breakout", response_model=BreakoutAnalysisResponse)
+async def analyze_breakout(request: BreakoutAnalyzeRequest) -> BreakoutAnalysisResponse:
+    """
+    Analyze market using the Simple Breakout Strategy.
+
+    This strategy is based on 5-minute candles:
+    - If current candle CLOSES above previous candle HIGH → Go SHORT
+    - If current candle CLOSES below previous candle LOW → Go LONG
+    - Only valid during London/New York sessions (NOT Asian)
+
+    Required candle format:
+    ```
+    {"open": 1.1234, "high": 1.1250, "low": 1.1220, "close": 1.1245, "time": "2024-01-01T10:00:00"}
+    ```
+    """
+    try:
+        agent = await get_main_agent()
+
+        # Use last candle close as current price if not provided
+        current_price = request.current_price
+        if current_price is None and request.candles_5m:
+            current_price = request.candles_5m[-1].get("close", 0)
+
+        # Use candle timestamp if not provided (for proper session detection)
+        timestamp = request.timestamp
+        if timestamp is None and request.candles_5m:
+            time_str = request.candles_5m[-1].get("time", "")
+            if time_str:
+                # Clean up timezone string
+                if time_str.endswith("Z"):
+                    time_str = time_str[:-1]
+                if "+00:00" in time_str:
+                    time_str = time_str.split("+")[0]
+                try:
+                    timestamp = datetime.fromisoformat(time_str)
+                except ValueError:
+                    timestamp = datetime.utcnow()
+            else:
+                timestamp = datetime.utcnow()
+        elif timestamp is None:
+            timestamp = datetime.utcnow()
+
+        observation, decision = await agent.analyze_breakout(
+            symbol=request.symbol,
+            timestamp=timestamp,
+            current_price=current_price,
+            candles_5m=request.candles_5m,
+            mode=request.mode
+        )
+
+        # Build response
+        obs_response = BreakoutObservationResponse(
+            symbol=observation.symbol,
+            timestamp=observation.timestamp.isoformat(),
+            current_price=observation.current_price,
+            summary=observation.to_summary(),
+            state_hash=observation.state_hash,
+            previous_candle=observation.previous_candle,
+            current_candle=observation.current_candle,
+            breakout_detected=observation.breakout_detected,
+            breakout_direction=observation.breakout_direction,
+            breakout_level=observation.breakout_level,
+            session=observation.session,
+            session_valid=observation.session_valid
+        )
+
+        dec_response = DecisionResponse(
+            decision=decision.decision,
+            confidence=decision.confidence,
+            reasoning=decision.reasoning,
+            brief_reason=decision.brief_reason,
+            rule_citations=decision.rule_citations,
+            setup=decision.setup,
+            latency_ms=decision.latency_ms,
+            mode=decision.mode
+        )
+
+        return BreakoutAnalysisResponse(
+            observation=obs_response,
+            decision=dec_response
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/observe/breakout", response_model=BreakoutObservationResponse)
+async def observe_breakout(request: BreakoutAnalyzeRequest) -> BreakoutObservationResponse:
+    """
+    Run breakout observation only (no agent reasoning).
+
+    Useful for:
+    - Debugging the breakout detection
+    - Fast candle analysis
+    - When you don't need an LLM decision
+    """
+    from app.tools.breakout import run_breakout_observation
+
+    try:
+        current_price = request.current_price
+        if current_price is None and request.candles_5m:
+            current_price = request.candles_5m[-1].get("close", 0)
+
+        timestamp = request.timestamp or datetime.utcnow()
+
+        observation = run_breakout_observation(
+            symbol=request.symbol,
+            timestamp=timestamp,
+            current_price=current_price,
+            candles_5m=request.candles_5m
+        )
+
+        return BreakoutObservationResponse(
+            symbol=observation.symbol,
+            timestamp=observation.timestamp.isoformat(),
+            current_price=observation.current_price,
+            summary=observation.to_summary(),
+            state_hash=observation.state_hash,
+            previous_candle=observation.previous_candle,
+            current_candle=observation.current_candle,
+            breakout_detected=observation.breakout_detected,
+            breakout_direction=observation.breakout_direction,
+            breakout_level=observation.breakout_level,
+            session=observation.session,
+            session_valid=observation.session_valid
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # Rate Limit Status
 # ============================================================================
 

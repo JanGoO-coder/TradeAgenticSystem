@@ -346,6 +346,32 @@ async def list_all_rules() -> dict:
 # Indexing Management
 # ============================================================================
 
+@router.delete("/embeddings")
+async def clear_embeddings() -> dict:
+    """
+    Clear all embeddings from the vector store.
+
+    Use this to reset the embedding index completely.
+    Requires reindexing after this operation.
+    """
+    try:
+        from app.services.vector_store import get_vector_store
+
+        settings = get_settings()
+        vector_store = await get_vector_store()
+
+        # Delete the collection
+        await vector_store.delete_collection(settings.strategy_collection)
+
+        return {
+            "message": "Embeddings cleared successfully",
+            "collection_deleted": settings.strategy_collection,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/reindex")
 async def trigger_reindex() -> dict:
     """
