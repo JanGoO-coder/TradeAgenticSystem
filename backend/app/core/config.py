@@ -39,10 +39,17 @@ class Settings(BaseSettings):
     mt5_server: str | None = None
 
     # =========================================================================
-    # LLM Configuration (Groq)
+    # LLM Configuration
     # =========================================================================
+    # Groq
     groq_api_key: str | None = None
-    groq_model: str = "openai/gpt-oss-120b"
+    groq_model: str = "llama-3.3-70b-versatile"
+    
+    # DeepSeek (uses OpenAI-compatible API)
+    # Models: deepseek-chat (fast), deepseek-reasoner (thinking/complex reasoning)
+    deepseek_api_key: str | None = None
+    deepseek_model: str = "deepseek-chat"
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
     
     # Legacy Gemini settings (for embeddings)
     gemini_api_key: str | None = None

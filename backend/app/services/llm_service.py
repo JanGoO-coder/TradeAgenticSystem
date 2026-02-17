@@ -1,6 +1,7 @@
 """
-Groq LLM Service with Rate Limiting.
+Multi-LLM Service with Rate Limiting.
 
+Supports Groq, DeepSeek, and Gemini backends with automatic fallback.
 Provides async generation and embedding capabilities with token bucket
 rate limiting to prevent 429 errors during batch backtesting.
 """
@@ -9,43 +10,136 @@ import json
 import hashlib
 from typing import Optional, Literal, AsyncGenerator
 from datetime import datetime
-from groq import Groq
 from aiolimiter import AsyncLimiter
 
 from app.core.config import get_settings
 
 
-class GroqService:
+class GeminiResponseWrapper:
+    """Wrapper to make Gemini responses compatible with OpenAI response format."""
+    
+    def __init__(self, gemini_response):
+        self._response = gemini_response
+        self.choices = [self._Choice(gemini_response)]
+        self.usage = self._Usage(gemini_response)
+    
+    class _Choice:
+        def __init__(self, response):
+            self.message = self._Message(response)
+        
+        class _Message:
+            def __init__(self, response):
+                try:
+                    self.content = response.text if hasattr(response, 'text') else ""
+                except Exception:
+                    self.content = ""
+    
+    class _Usage:
+        def __init__(self, response):
+            try:
+                usage = getattr(response, 'usage_metadata', None)
+                self.prompt_tokens = getattr(usage, 'prompt_token_count', 0) if usage else 0
+                self.completion_tokens = getattr(usage, 'candidates_token_count', 0) if usage else 0
+            except Exception:
+                self.prompt_tokens = 0
+                self.completion_tokens = 0
+
+
+class LLMService:
     """
-    Groq LLM service with rate limiting and retry logic.
+    Multi-LLM service with rate limiting and retry logic.
+
+    Supports (in priority order):
+    1. Groq - Fast inference with Llama models
+    2. DeepSeek - OpenAI-compatible API with DeepSeek models
+    3. Gemini - Google's Gemini models (also used for embeddings)
 
     Features:
     - Token bucket rate limiting (configurable RPM)
     - Automatic retry with exponential backoff on 429
     - Streaming support for verbose reasoning
-    - Embedding generation for RAG (via Gemini fallback)
+    - Embedding generation for RAG (via Gemini)
     """
 
     def __init__(self):
         settings = get_settings()
-
-        # Configure Groq API
-        self.client = Groq(api_key=settings.groq_api_key)
-        self.model = settings.groq_model
-
-        # Gemini for embeddings (optional)
-        self.embedding_model = settings.gemini_embedding_model
+        
+        # Track which backend we're using
+        self._backend = None  # "groq", "deepseek", or "gemini"
+        self._backend_model = None
+        self._backend_api_key = None
+        
+        # Initialize clients
+        self._groq_client = None
+        self._deepseek_client = None
+        self._gemini_model = None
+        self._genai = None
         self._gemini_configured = False
+        
+        # Try Groq first
+        if settings.groq_api_key:
+            try:
+                from groq import Groq
+                self._groq_client = Groq(api_key=settings.groq_api_key)
+                self._backend = "groq"
+                self._backend_model = settings.groq_model
+                self._backend_api_key = settings.groq_api_key
+            except Exception as e:
+                print(f"⚠️  Failed to initialize Groq: {e}")
+        
+        # Try DeepSeek second
+        if not self._backend and settings.deepseek_api_key:
+            try:
+                from openai import OpenAI
+                self._deepseek_client = OpenAI(
+                    api_key=settings.deepseek_api_key,
+                    base_url=settings.deepseek_base_url
+                )
+                self._backend = "deepseek"
+                self._backend_model = settings.deepseek_model
+                self._backend_api_key = settings.deepseek_api_key
+            except Exception as e:
+                print(f"⚠️  Failed to initialize DeepSeek: {e}")
+        
+        # Try Gemini third (always configure for embeddings too)
         api_key = settings.gemini_api_key or settings.google_api_key
+        print(f"🔍 Checking Gemini: gemini_api_key={'set' if settings.gemini_api_key else 'not set'}, google_api_key={'set' if settings.google_api_key else 'not set'}")
         if api_key:
             try:
                 import google.generativeai as genai
+                print(f"🔍 Configuring Gemini with model: {settings.gemini_model}")
                 genai.configure(api_key=api_key)
                 self._gemini_configured = True
                 self._genai = genai
+                self._gemini_model = genai.GenerativeModel(settings.gemini_model)
+                
+                if not self._backend:
+                    self._backend = "gemini"
+                    self._backend_model = settings.gemini_model
+                    self._backend_api_key = api_key
+                    print(f"✅ Gemini configured as primary backend")
             except ImportError:
-                pass
-
+                print("⚠️  google-generativeai package not installed")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize Gemini: {e}")
+        else:
+            print("⚠️  No Gemini API key found in settings")
+        
+        # Ensure at least one LLM is configured
+        if not self._backend:
+            print(f"❌ No backend configured. Groq: {settings.groq_api_key is not None}, DeepSeek: {settings.deepseek_api_key is not None}, Gemini: {api_key is not None}")
+            raise ValueError(
+                "No LLM configured. Please set one of: GROQ_API_KEY, DEEPSEEK_API_KEY, or GOOGLE_API_KEY"
+            )
+        
+        # Log which LLM backend is active
+        masked_key = self._mask_key(self._backend_api_key)
+        print(f"🤖 LLM Service initialized: Using {self._backend.upper()} ({self._backend_model})")
+        print(f"   API Key: {masked_key}")
+        
+        # Embedding model (Gemini only)
+        self.embedding_model = settings.gemini_embedding_model
+        
         # Rate limiting
         self.limiter = AsyncLimiter(
             max_rate=settings.llm_burst_size,
@@ -58,6 +152,14 @@ class GroqService:
         # Track usage for monitoring
         self._request_count = 0
         self._last_reset = datetime.now()
+    
+    def _mask_key(self, key: str | None) -> str:
+        """Mask API key for logging."""
+        if not key or len(key) <= 12:
+            return "***"
+        return f"{key[:8]}...{key[-4:]}"
+
+
 
     async def generate(
         self,
@@ -223,24 +325,36 @@ class GroqService:
 
         for attempt in range(self.retry_attempts):
             try:
-                response = await asyncio.to_thread(
-                    self.client.chat.completions.create,
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_completion_tokens=max_tokens,
-                    top_p=1,
-                    stream=False,
-                    stop=None
-                )
-                return response
+                if self._backend == "groq" and self._groq_client:
+                    # Use Groq
+                    response = await asyncio.to_thread(
+                        self._groq_client.chat.completions.create,
+                        model=self._backend_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_completion_tokens=max_tokens,
+                        top_p=1,
+                        stream=False,
+                        stop=None
+                    )
+                    return response
+                elif self._backend == "deepseek" and self._deepseek_client:
+                    # Use DeepSeek (OpenAI-compatible)
+                    response = await self._generate_with_deepseek(messages, temperature, max_tokens)
+                    return response
+                elif self._backend == "gemini" and self._gemini_model:
+                    # Use Gemini
+                    response = await self._generate_with_gemini(messages, temperature, max_tokens)
+                    return response
+                else:
+                    raise ValueError(f"No LLM backend available (backend={self._backend})")
 
             except Exception as e:
                 last_error = e
                 error_str = str(e).lower()
 
                 # Check if rate limited (429)
-                if "429" in error_str or "rate" in error_str:
+                if "429" in error_str or "rate" in error_str or "quota" in error_str:
                     delay = self.retry_base_delay * (2 ** attempt)
                     await asyncio.sleep(delay)
                     continue
@@ -250,6 +364,59 @@ class GroqService:
 
         # All retries exhausted
         raise last_error
+
+    async def _generate_with_deepseek(
+        self,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int
+    ):
+        """Generate using DeepSeek API (OpenAI-compatible)."""
+        response = await asyncio.to_thread(
+            self._deepseek_client.chat.completions.create,
+            model=self._backend_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=1,
+            stream=False
+        )
+        return response
+
+    async def _generate_with_gemini(
+        self,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int
+    ):
+        """Generate using Gemini API with response wrapper for compatibility."""
+        # Convert messages to Gemini format
+        prompt_parts = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                prompt_parts.append(f"System Instructions:\n{content}")
+            else:
+                prompt_parts.append(content)
+        
+        full_prompt = "\n\n".join(prompt_parts)
+        
+        # Generate with Gemini
+        generation_config = {
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            "top_p": 1,
+        }
+        
+        response = await asyncio.to_thread(
+            self._gemini_model.generate_content,
+            full_prompt,
+            generation_config=generation_config
+        )
+        
+        # Wrap response in compatible format
+        return GeminiResponseWrapper(response)
 
     def _build_concise_prompt(self, prompt: str, system_instruction: Optional[str]) -> str:
         """Build prompt for concise JSON output."""
@@ -361,17 +528,20 @@ Important: rule_citations should be rule numbers from the strategy (e.g., "1.1",
 
 
 # Singleton instance
-_groq_service: Optional[GroqService] = None
+_llm_service: Optional[LLMService] = None
 
 
-def get_groq_service() -> GroqService:
-    """Get or create the Groq service singleton."""
-    global _groq_service
-    if _groq_service is None:
-        _groq_service = GroqService()
-    return _groq_service
+def get_llm_service() -> LLMService:
+    """Get or create the LLM service singleton."""
+    global _llm_service
+    if _llm_service is None:
+        _llm_service = LLMService()
+    return _llm_service
 
 
-# Alias for backward compatibility
-GeminiService = GroqService
-get_gemini_service = get_groq_service
+# Aliases for backward compatibility
+GroqService = LLMService
+GeminiService = LLMService
+get_groq_service = get_llm_service
+get_gemini_service = get_llm_service
+

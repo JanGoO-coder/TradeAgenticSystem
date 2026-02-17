@@ -453,7 +453,7 @@ export default function AgentBacktestPage() {
                                 <div>
                                     <p className="text-yellow-200 font-medium">API Rate Limit Reached</p>
                                     <p className="text-yellow-300/80 text-sm mt-1">{rateLimitError}</p>
-                                    <p className="text-yellow-300/60 text-xs mt-2">Wait a moment before continuing, or upgrade your Gemini API plan for higher limits.</p>
+                                    <p className="text-yellow-300/60 text-xs mt-2">Wait a moment before continuing. The LLM service will retry automatically.</p>
                                 </div>
                                 <Button
                                     variant="ghost"
@@ -569,15 +569,14 @@ export default function AgentBacktestPage() {
                                                     <td className="py-2 text-center">
                                                         <Badge variant={
                                                             trade.status === 'won' ? 'default' :
-                                                            trade.status === 'lost' ? 'destructive' :
-                                                            'secondary'
+                                                                trade.status === 'lost' ? 'destructive' :
+                                                                    'secondary'
                                                         }>
                                                             {trade.status.toUpperCase()}
                                                         </Badge>
                                                     </td>
-                                                    <td className={`py-2 text-right ${
-                                                        (trade.pnl_r ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
-                                                    }`}>
+                                                    <td className={`py-2 text-right ${(trade.pnl_r ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
+                                                        }`}>
                                                         {trade.pnl_r ? `${trade.pnl_r > 0 ? '+' : ''}${trade.pnl_r.toFixed(2)}R` : '-'}
                                                     </td>
                                                     <td className="py-2">

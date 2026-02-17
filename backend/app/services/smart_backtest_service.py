@@ -15,14 +15,17 @@ import logging
 from app.core.config import get_settings
 from app.services.mt5_service import get_mt5_service
 from app.agent.main_agent import get_main_agent, MainAgent
-from app.tools.observer import run_all_observations, MarketObservation
-from app.tools.breakout import run_breakout_observation, BreakoutObservation
+from app.tools.observer import run_event_observation
+from app.domain.observation import ObservationResult
 from app.domain.backtest import (
     BacktestSession,
     BacktestDecision,
     BacktestTrade,
     TradeResult
 )
+
+# ICT Architecture imports
+from app.domain.observation import ObservationResult
 
 logger = logging.getLogger(__name__)
 
@@ -312,22 +315,28 @@ class SmartBacktestService:
             "micro": micro_data[max(0, index * 3 - ltf_lookback * 3):index * 3 + 3] if micro_data else []
         }
 
-    async def analyze_at_index(
+    async def analyze_ict_at_index(
         self,
         index: int,
         mode: str = "concise",
         force: bool = False
-    ) -> tuple[MarketObservation, BacktestDecision]:
+    ) -> tuple[ObservationResult, BacktestDecision]:
         """
-        Run agent analysis at a specific index.
-
+        Run ICT Architecture analysis at a specific index.
+        
+        Uses the new ICT architecture with:
+        - Event-based observer
+        - Context manager
+        - Phase detection
+        - Decision validator (veto layer)
+        
         Args:
-            index: Candle index to analyze
+            index: Candle index to analyze (on LTF)
             mode: "verbose" or "concise"
             force: Force analysis even if state hasn't changed
-
+            
         Returns:
-            Tuple of (observation, decision)
+            Tuple of (ObservationResult, BacktestDecision)
         """
         await self.initialize()
         session = self._session
@@ -339,133 +348,10 @@ class SmartBacktestService:
         candles = self.get_candles_at_index(index)
 
         if not candles.get("ltf"):
-            raise ValueError(f"No data at index {index}")
+            raise ValueError(f"No LTF data at index {index}")
 
         # Get timestamp from current LTF candle
         current_candle = candles["ltf"][-1]
-        time_str = current_candle["time"]
-
-        # Clean up timezone string - handle various formats
-        # Remove trailing Z
-        if time_str.endswith("Z"):
-            time_str = time_str[:-1]
-
-        # Remove any existing timezone info for clean parsing
-        if "+00:00" in time_str:
-            time_str = time_str.split("+")[0]
-        if "-" in time_str and time_str.count("-") > 2:
-            # Has timezone offset like -05:00
-            parts = time_str.rsplit("-", 1)
-            if ":" in parts[-1] and len(parts[-1]) <= 6:
-                time_str = parts[0]
-
-        try:
-            timestamp = datetime.fromisoformat(time_str)
-        except ValueError as e:
-            # Last resort fallback
-            logger.warning(f"Could not parse timestamp {time_str}: {e}")
-            timestamp = datetime.now()
-
-        # Run observation
-        observation = run_all_observations(
-            htf_candles=candles["htf"],
-            ltf_candles=candles["ltf"],
-            symbol=session.symbol,
-            timestamp=timestamp,
-            micro_candles=candles.get("micro")
-        )
-
-        # Check if state changed (selective analysis)
-        if not force and self.settings.backtest_selective_mode:
-            if observation.state_hash == session.last_state_hash:
-                # Skip analysis, return cached decision
-                last_decision = session.decisions[-1] if session.decisions else None
-
-                decision = BacktestDecision(
-                    index=index,
-                    timestamp=timestamp,
-                    decision=last_decision.decision if last_decision else "WAIT",
-                    confidence=last_decision.confidence if last_decision else 0.0,
-                    brief_reason="State unchanged - using previous decision",
-                    rule_citations=last_decision.rule_citations if last_decision else [],
-                    observation_hash=observation.state_hash,
-                    price_at_decision=observation.current_price,
-                    skipped=True
-                )
-
-                session.add_decision(decision)
-                return observation, decision
-
-        # Run agent analysis
-        agent_decision = await self._agent.analyze(observation, mode)
-
-        # Convert to backtest decision
-        decision = BacktestDecision(
-            index=index,
-            timestamp=timestamp,
-            decision=agent_decision.decision,
-            confidence=agent_decision.confidence,
-            brief_reason=agent_decision.brief_reason,
-            rule_citations=agent_decision.rule_citations,
-            setup=agent_decision.setup,
-            observation_hash=observation.state_hash,
-            price_at_decision=observation.current_price,
-            latency_ms=agent_decision.latency_ms,
-            skipped=False
-        )
-
-        # Update session
-        session.last_state_hash = observation.state_hash
-        session.add_decision(decision)
-
-        # Handle trade setup
-        if decision.decision == "TRADE" and decision.setup:
-            await self._open_trade(decision, session)
-
-        return observation, decision
-
-    async def analyze_breakout_at_index(
-        self,
-        index: int,
-        mode: str = "concise",
-        force: bool = False
-    ) -> tuple[BreakoutObservation, BacktestDecision]:
-        """
-        Run Simple Breakout Strategy analysis at a specific index.
-
-        Uses 5-minute candles to detect breakouts:
-        - Break above previous candle high → SHORT
-        - Break below previous candle low → LONG
-
-        Args:
-            index: Candle index to analyze (on 5M timeframe)
-            mode: "verbose" or "concise"
-            force: Force analysis even if state hasn't changed
-
-        Returns:
-            Tuple of (BreakoutObservation, BacktestDecision)
-        """
-        await self.initialize()
-        session = self._session
-
-        if not session:
-            raise ValueError("No active session")
-
-        # Get 5M candles at this point in time
-        micro_data = self._data.get("5M", [])
-
-        if not micro_data or index >= len(micro_data):
-            raise ValueError(f"No 5M data at index {index}")
-
-        # Get last few 5M candles (need at least 2 for breakout detection)
-        lookback = min(index + 1, 10)  # Last 10 candles max
-        candles_5m = micro_data[max(0, index - lookback + 1):index + 1]
-
-        if len(candles_5m) < 2:
-            raise ValueError(f"Need at least 2 candles for breakout detection")
-
-        # Get timestamp from current candle
-        current_candle = candles_5m[-1]
         time_str = current_candle["time"]
 
         # Clean up timezone string
@@ -473,6 +359,10 @@ class SmartBacktestService:
             time_str = time_str[:-1]
         if "+00:00" in time_str:
             time_str = time_str.split("+")[0]
+        if "-" in time_str and time_str.count("-") > 2:
+            parts = time_str.rsplit("-", 1)
+            if ":" in parts[-1] and len(parts[-1]) <= 6:
+                time_str = parts[0]
 
         try:
             timestamp = datetime.fromisoformat(time_str)
@@ -480,47 +370,29 @@ class SmartBacktestService:
             logger.warning(f"Could not parse timestamp {time_str}: {e}")
             timestamp = datetime.now()
 
-        current_price = current_candle.get("close", 0)
-
-        # Run breakout observation
-        observation = run_breakout_observation(
+        # Run ICT analysis via new architecture
+        observation, agent_decision = await self._agent.analyze_ict(
+            htf_candles=candles["htf"],
+            ltf_candles=candles["ltf"],
             symbol=session.symbol,
             timestamp=timestamp,
-            current_price=current_price,
-            candles_5m=candles_5m
-        )
-
-        # Check if state changed (selective analysis)
-        if not force and self.settings.backtest_selective_mode:
-            if observation.state_hash == session.last_state_hash:
-                # Skip analysis, return cached decision
-                last_decision = session.decisions[-1] if session.decisions else None
-
-                decision = BacktestDecision(
-                    index=index,
-                    timestamp=timestamp,
-                    decision=last_decision.decision if last_decision else "WAIT",
-                    confidence=last_decision.confidence if last_decision else 0.0,
-                    brief_reason="State unchanged - using previous decision",
-                    rule_citations=last_decision.rule_citations if last_decision else [],
-                    observation_hash=observation.state_hash,
-                    price_at_decision=observation.current_price,
-                    skipped=True
-                )
-
-                session.add_decision(decision)
-                return observation, decision
-
-        # Run agent analysis using breakout method
-        _, agent_decision = await self._agent.analyze_breakout(
-            symbol=session.symbol,
-            timestamp=timestamp,
-            current_price=current_price,
-            candles_5m=candles_5m,
             mode=mode
         )
 
-        # Convert to backtest decision
+        # Convert TradeSetup to dict if present
+        setup_dict = None
+        if agent_decision.setup:
+            setup = agent_decision.setup
+            setup_dict = {
+                "direction": setup.direction,
+                "entry": setup.entry_price,
+                "stop_loss": setup.stop_loss,
+                "take_profit": setup.take_profit,
+                "entry_model": setup.entry_model,
+                "pd_array_type": setup.pd_array_type
+            }
+
+        # Build BacktestDecision
         decision = BacktestDecision(
             index=index,
             timestamp=timestamp,
@@ -528,19 +400,28 @@ class SmartBacktestService:
             confidence=agent_decision.confidence,
             brief_reason=agent_decision.brief_reason,
             rule_citations=agent_decision.rule_citations,
-            setup=agent_decision.setup,
+            setup=setup_dict,
             observation_hash=observation.state_hash,
             price_at_decision=observation.current_price,
-            latency_ms=agent_decision.latency_ms,
+            latency_ms=agent_decision.total_latency_ms,
             skipped=False
         )
+
+        # Add extra ICT context (validation result, phase)
+        decision.extra = {
+            "phase": agent_decision.phase_at_decision,
+            "validated": agent_decision.validation.approved if agent_decision.validation else True,
+            "veto_reasons": [v.value for v in agent_decision.validation.veto_reasons] if agent_decision.validation else [],
+            "events_count": len(observation.events)
+        }
 
         # Update session
         session.last_state_hash = observation.state_hash
         session.add_decision(decision)
 
-        # Handle trade setup
-        if decision.decision == "TRADE" and decision.setup:
+        # Handle trade setup (only if validated/approved)
+        is_approved = agent_decision.validation.approved if agent_decision.validation else True
+        if decision.decision == "TRADE" and decision.setup and is_approved:
             await self._open_trade(decision, session)
 
         return observation, decision
@@ -683,7 +564,7 @@ class SmartBacktestService:
 
                 # Run analysis
                 try:
-                    observation, decision = await self.analyze_at_index(
+                    observation, decision = await self.analyze_ict_at_index(
                         index, mode="concise"
                     )
 
@@ -750,22 +631,24 @@ class SmartBacktestService:
             yield {"event": "error", "error": str(e)}
             raise
 
-    async def run_breakout_batch(
+    async def run_ict_batch(
         self,
         step_size: int = 1,
         max_concurrent: int = 10
     ) -> AsyncGenerator[Dict, None]:
         """
-        Run batch backtest for Simple Breakout Strategy with progress streaming.
-
-        Uses 5-minute candles to detect breakouts:
-        - Break above previous candle high → SHORT
-        - Break below previous candle low → LONG
-
+        Run batch backtest using the new ICT Architecture with progress streaming.
+        
+        Uses the full ICT pipeline:
+        - Event-based observer
+        - Context manager with memory
+        - Phase detection (PO3)
+        - Decision validator (veto layer)
+        
         Args:
-            step_size: Candles to advance per step (on 5M timeframe)
-            max_concurrent: Max parallel agent calls
-
+            step_size: Candles to advance per step (on LTF)
+            max_concurrent: Max parallel agent calls (not used yet)
+            
         Yields:
             Progress updates and results
         """
@@ -776,30 +659,24 @@ class SmartBacktestService:
             yield {"error": "No active session"}
             return
 
-        # Ensure 5M data is loaded
-        micro_data = self._data.get("5M", [])
-        if not micro_data:
-            yield {"error": "No 5M data loaded. Load data with 5M timeframe."}
-            return
-
-        total_5m_candles = len(micro_data)
-
         session.status = "RUNNING"
         session.started_at = datetime.utcnow()
 
         yield {
             "event": "started",
             "session_id": session.session_id,
-            "total_candles": total_5m_candles,
-            "strategy": "Simple Breakout Strategy"
+            "total_candles": session.total_candles,
+            "strategy": "ICT Architecture"
         }
 
         try:
-            index = 2  # Start after at least 2 candles (need previous candle)
+            index = 50  # Start after enough history
+            vetoed_count = 0
+            approved_count = 0
 
-            while index < total_5m_candles:
-                # Check for trade exits first using 5M candles
-                closed = self._check_breakout_trade_exits(index, micro_data)
+            while index < session.total_candles:
+                # Check for trade exits first
+                closed = self.check_trade_exits(index)
 
                 if closed:
                     yield {
@@ -808,58 +685,66 @@ class SmartBacktestService:
                         "trades": [t.to_dict() for t in closed]
                     }
 
-                # Run breakout analysis
+                # Run ICT analysis
                 try:
-                    observation, decision = await self.analyze_breakout_at_index(
+                    observation, decision = await self.analyze_ict_at_index(
                         index, mode="concise"
                     )
 
-                    # Update progress based on 5M index
-                    session.current_index = index
-                    session.progress = (index / total_5m_candles) * 100
+                    # Track validation stats
+                    if decision.extra:
+                        if decision.extra.get("validated"):
+                            approved_count += 1
+                        else:
+                            vetoed_count += 1
 
-                    # Yield progress every 10 candles or on TRADE decisions
-                    if index % 10 == 0 or decision.decision == "TRADE":
+                    session.update_progress(index)
+
+                    # Yield progress every 10 candles or on decisions
+                    if index % 10 == 0 or decision.decision != "WAIT":
                         yield {
                             "event": "progress",
                             "index": index,
                             "progress": session.progress,
                             "decision": decision.decision,
-                            "skipped": decision.skipped,
+                            "phase": decision.extra.get("phase") if decision.extra else None,
+                            "validated": decision.extra.get("validated") if decision.extra else True,
                             "total_decisions": len(session.decisions),
                             "total_trades": len(session.trades),
-                            "breakout_detected": observation.breakout_detected,
-                            "session_valid": observation.session_valid
+                            "approved_count": approved_count,
+                            "vetoed_count": vetoed_count
                         }
 
                 except Exception as e:
-                    logger.error(f"Error at index {index}: {e}")
+                    logger.error(f"ICT analysis error at index {index}: {e}")
                     yield {"event": "error", "index": index, "error": str(e)}
 
                 index += step_size
 
-                # Rate limiting - small delay between calls
+                # Rate limiting
                 await asyncio.sleep(0.01)
 
             # Close any remaining open trades
             for trade in session.trades:
                 if trade.result == TradeResult.OPEN:
-                    last_candle = micro_data[-1]
-                    time_str = last_candle["time"]
-                    if time_str.endswith("Z"):
-                        time_str = time_str[:-1]
-                    if "+00:00" in time_str:
-                        time_str = time_str.split("+")[0]
-                    try:
-                        timestamp = datetime.fromisoformat(time_str)
-                    except ValueError:
-                        timestamp = datetime.now()
-                    trade.calculate_result(
-                        last_candle["close"],
-                        total_5m_candles - 1,
-                        timestamp,
-                        "END_OF_DATA"
-                    )
+                    candles = self.get_candles_at_index(session.total_candles - 1)
+                    if candles.get("ltf"):
+                        last_candle = candles["ltf"][-1]
+                        time_str = last_candle["time"]
+                        if time_str.endswith("Z"):
+                            time_str = time_str[:-1]
+                        if "+00:00" in time_str:
+                            time_str = time_str.split("+")[0]
+                        try:
+                            timestamp = datetime.fromisoformat(time_str)
+                        except ValueError:
+                            timestamp = datetime.now()
+                        trade.calculate_result(
+                            last_candle["close"],
+                            session.total_candles - 1,
+                            timestamp,
+                            "END_OF_DATA"
+                        )
 
             # Finalize session
             session.finalize()
@@ -870,7 +755,12 @@ class SmartBacktestService:
             yield {
                 "event": "completed",
                 "session_id": session.session_id,
+                "strategy": "ICT Architecture",
                 "performance": session.performance.to_dict(),
+                "validation_stats": {
+                    "approved": approved_count,
+                    "vetoed": vetoed_count
+                },
                 "saved_to": path
             }
 
@@ -878,68 +768,6 @@ class SmartBacktestService:
             session.status = "ERROR"
             yield {"event": "error", "error": str(e)}
             raise
-
-    def _check_breakout_trade_exits(self, index: int, micro_data: List[Dict]) -> List[BacktestTrade]:
-        """
-        Check if any open trades have hit TP/SL using 5M candles.
-
-        Args:
-            index: Current 5M candle index
-            micro_data: 5M candle data
-
-        Returns:
-            List of trades that were closed
-        """
-        session = self._session
-        if not session or index >= len(micro_data):
-            return []
-
-        current_candle = micro_data[index]
-        high = current_candle["high"]
-        low = current_candle["low"]
-
-        # Parse timestamp safely
-        time_str = current_candle["time"]
-        if time_str.endswith("Z"):
-            time_str = time_str[:-1]
-        if "+00:00" in time_str:
-            time_str = time_str.split("+")[0]
-        try:
-            timestamp = datetime.fromisoformat(time_str)
-        except ValueError:
-            timestamp = datetime.now()
-
-        closed_trades = []
-
-        for trade in session.trades:
-            if trade.result != TradeResult.OPEN:
-                continue
-
-            if trade.direction == "LONG":
-                # Check SL first (conservative)
-                if low <= trade.stop_loss:
-                    trade.calculate_result(
-                        trade.stop_loss, index, timestamp, "SL_HIT"
-                    )
-                    closed_trades.append(trade)
-                elif high >= trade.take_profit:
-                    trade.calculate_result(
-                        trade.take_profit, index, timestamp, "TP_HIT"
-                    )
-                    closed_trades.append(trade)
-            else:  # SHORT
-                if high >= trade.stop_loss:
-                    trade.calculate_result(
-                        trade.stop_loss, index, timestamp, "SL_HIT"
-                    )
-                    closed_trades.append(trade)
-                elif low <= trade.take_profit:
-                    trade.calculate_result(
-                        trade.take_profit, index, timestamp, "TP_HIT"
-                    )
-                    closed_trades.append(trade)
-
-        return closed_trades
 
     # =========================================================================
     # Interactive Mode
@@ -962,7 +790,7 @@ class SmartBacktestService:
         closed = self.check_trade_exits(new_index)
 
         # Run analysis
-        observation, decision = await self.analyze_at_index(new_index, mode="verbose")
+        observation, decision = await self.analyze_ict_at_index(new_index, mode="verbose")
 
         return {
             "index": new_index,

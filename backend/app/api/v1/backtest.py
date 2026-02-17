@@ -2,6 +2,7 @@
 Smart Backtest API Endpoints.
 
 Endpoints for the time-machine backtesting system.
+Uses the ICT Architecture for market analysis.
 """
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -243,7 +244,13 @@ async def analyze_current_position(
     mode: str = Query("verbose", description="verbose or concise")
 ) -> dict:
     """
-    Run agent analysis at current position.
+    Run ICT Architecture analysis at current position.
+    
+    Uses the full ICT pipeline:
+    - Event-based observer
+    - Context manager
+    - Phase detection
+    - Decision validator (veto layer)
     """
     try:
         service = await get_smart_backtest_service()
@@ -252,7 +259,7 @@ async def analyze_current_position(
         if not session:
             raise HTTPException(status_code=400, detail="No active session")
 
-        observation, decision = await service.analyze_at_index(
+        observation, decision = await service.analyze_ict_at_index(
             session.current_index,
             mode=mode,
             force=True  # Always analyze when explicitly requested
@@ -261,6 +268,10 @@ async def analyze_current_position(
         return {
             "observation": observation.to_summary(),
             "observation_hash": observation.state_hash,
+            "events_count": len(observation.events),
+            "phase": decision.extra.get("phase") if decision.extra else None,
+            "validated": decision.extra.get("validated") if decision.extra else True,
+            "veto_reasons": decision.extra.get("veto_reasons") if decision.extra else [],
             "decision": decision.to_dict()
         }
     except HTTPException:
@@ -280,52 +291,25 @@ async def analyze_current_position(
 @router.post("/run")
 async def run_batch_backtest(request: RunBatchRequest = RunBatchRequest()):
     """
-    Run batch backtest with streaming progress.
+    Run batch backtest using ICT Architecture with streaming progress.
 
-    Returns a stream of JSON events:
-    - started: Session started
-    - progress: Current position and stats
-    - trades_closed: Trades that hit TP/SL
-    - completed: Final results
-    - error: Error occurred
-    """
-    async def event_stream():
-        service = await get_smart_backtest_service()
-
-        async for event in service.run_batch(
-            step_size=request.step_size,
-            max_concurrent=request.max_concurrent
-        ):
-            yield f"data: {json.dumps(event)}\n\n"
-            await asyncio.sleep(0.01)  # Small delay for buffering
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream"
-    )
-
-
-@router.post("/run/breakout")
-async def run_breakout_backtest(request: RunBatchRequest = RunBatchRequest()):
-    """
-    Run batch backtest using the Simple Breakout Strategy with streaming progress.
-
-    This strategy uses 5-minute candles:
-    - If current candle CLOSES above previous candle HIGH → Go SHORT
-    - If current candle CLOSES below previous candle LOW → Go LONG
-    - Only valid during London/New York sessions (NOT Asian)
+    Uses the full ICT pipeline:
+    - Event-based observer
+    - Context manager with memory
+    - Phase detection (PO3)
+    - Decision validator (veto layer)
 
     Returns a stream of JSON events:
     - started: Session started with strategy info
-    - progress: Current position, breakout detection, session validity
+    - progress: Current position, phase, validation stats
     - trades_closed: Trades that hit TP/SL
-    - completed: Final results
+    - completed: Final results with validation stats
     - error: Error occurred
     """
     async def event_stream():
         service = await get_smart_backtest_service()
 
-        async for event in service.run_breakout_batch(
+        async for event in service.run_ict_batch(
             step_size=request.step_size,
             max_concurrent=request.max_concurrent
         ):
@@ -336,58 +320,6 @@ async def run_breakout_backtest(request: RunBatchRequest = RunBatchRequest()):
         event_stream(),
         media_type="text/event-stream"
     )
-
-
-@router.post("/analyze/breakout")
-async def analyze_breakout_at_current(
-    mode: str = Query("verbose", description="verbose or concise")
-) -> dict:
-    """
-    Run Simple Breakout Strategy analysis at current position.
-
-    Uses 5-minute candles to detect:
-    - Break above previous candle high → SHORT signal
-    - Break below previous candle low → LONG signal
-    """
-    try:
-        service = await get_smart_backtest_service()
-        session = service.get_session()
-
-        if not session:
-            raise HTTPException(status_code=400, detail="No active session")
-
-        # Use 5M data for breakout analysis
-        micro_data = service._data.get("5M", [])
-        if not micro_data:
-            raise HTTPException(status_code=400, detail="No 5M data available")
-
-        # Map current LTF index to approximate 5M index
-        ltf_per_5m = 3  # 15M / 5M
-        micro_index = min(session.current_index * ltf_per_5m, len(micro_data) - 1)
-
-        observation, decision = await service.analyze_breakout_at_index(
-            micro_index,
-            mode=mode,
-            force=True
-        )
-
-        return {
-            "observation": observation.to_summary(),
-            "observation_hash": observation.state_hash,
-            "breakout_detected": observation.breakout_detected,
-            "breakout_direction": observation.breakout_direction,
-            "session": observation.session,
-            "session_valid": observation.session_valid,
-            "previous_candle": observation.previous_candle,
-            "current_candle": observation.current_candle,
-            "decision": decision.to_dict()
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================

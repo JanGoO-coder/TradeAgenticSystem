@@ -1,8 +1,11 @@
 """
 Main Trading Agent - The Brain.
 
-This agent receives market observations from tools, retrieves relevant
-strategies via RAG, and reasons over them to make trading decisions.
+This agent uses the ICT Architecture for market analysis:
+- Event-based observation
+- Persistent context
+- Phase detection
+- Decision validation
 
 The code does not make trading decisions.
 The code only observes and reports.
@@ -17,98 +20,50 @@ import json
 from app.core.config import get_settings
 from app.services.llm_service import get_gemini_service, GeminiService
 from app.services.strategy_store import get_strategy_store, StrategyStore
-from app.tools.observer import MarketObservation, run_all_observations
-from app.tools.breakout import (
-    BreakoutObservation,
-    run_breakout_observation,
-    get_breakout_entry_exit
+from app.tools.observer import run_event_observation
+
+# ICT Architecture Components
+from app.domain.observation import ObservationResult
+from app.domain.decision import (
+    ProposedDecision,
+    ValidationResult,
+    AgentDecision as DomainAgentDecision,
+    TradeSetup
 )
-
-
-@dataclass
-class AgentDecision:
-    """
-    The agent's trading decision with full reasoning trace.
-    """
-    # Decision
-    decision: Literal["TRADE", "WAIT", "NO_TRADE"]
-    confidence: float  # 0.0 to 1.0
-
-    # Reasoning (verbose mode only)
-    reasoning: Optional[str] = None
-    brief_reason: str = ""
-
-    # Rule citations
-    rule_citations: List[str] = field(default_factory=list)
-
-    # Trade setup (if decision is TRADE)
-    setup: Optional[dict] = None  # {direction, entry, stop_loss, take_profit}
-
-    # Meta
-    observation_hash: str = ""
-    strategy_context: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    latency_ms: int = 0
-    mode: str = "concise"
-
-    def to_dict(self) -> dict:
-        return {
-            "decision": self.decision,
-            "confidence": self.confidence,
-            "reasoning": self.reasoning,
-            "brief_reason": self.brief_reason,
-            "rule_citations": self.rule_citations,
-            "setup": self.setup,
-            "observation_hash": self.observation_hash,
-            "timestamp": self.timestamp.isoformat(),
-            "latency_ms": self.latency_ms,
-            "mode": self.mode
-        }
+from app.domain.phase import MarketPhase
+from app.services.market_context import get_context_manager, MarketContextManager
+from app.services.phase_detector import get_phase_detector, PhaseDetector
+from app.agent.prompt_builder import get_prompt_builder, ICTPromptBuilder
+from app.agent.decision_validator import get_decision_validator, DecisionValidator
 
 
 class MainAgent:
     """
-    The hybrid trading agent.
+    The ICT Trading Agent.
 
     Architecture:
-    - Tools provide observations (what the market looks like)
-    - RAG provides strategy context (what the rules say)
-    - LLM reasons over both to decide (what to do)
+    - Event Observer provides factual market events
+    - Context Manager tracks persistent state
+    - Phase Detector identifies PO3 phases
+    - Prompt Builder generates dynamic ICT prompts
+    - Decision Validator enforces hard rules
 
     The agent does NOT execute trades. It only provides decisions
     with reasoning that can be reviewed by a human.
     """
-
-    SYSTEM_INSTRUCTION = """You are an expert ICT (Inner Circle Trader) analyst.
-
-Your role is to analyze market observations and determine if trading conditions align
-with the provided trading strategies and rules.
-
-You must:
-1. Carefully review the market observations provided
-2. Consider the relevant strategy rules retrieved for this context
-3. Reason about whether conditions meet the criteria for a trade
-4. Be conservative - only recommend trades when the setup is clear
-5. Always cite specific rule numbers when making decisions
-
-Simple Breakout Strategy (Current Active Rules):
-- Rule 1.1: If 5-min candle breaks previous candle HIGH → Go SHORT
-- Rule 1.1: If 5-min candle breaks previous candle LOW → Go LONG
-- Rule 1.2: Entry conditions - wait for candle close, confirm break
-- Rule 1.3: Exit conditions - stop loss and take profit placement
-- Valid only during active sessions (London, New York)
-- Invalid during low volatility (Asian session)
-
-Decision Guidelines:
-- TRADE: Clear break of previous candle high/low with candle close confirmation
-- WAIT: Waiting for candle to close or for active session
-- NO_TRADE: No clear break, or during invalid trading period (Asian session)"""
 
     def __init__(self):
         self.settings = get_settings()
         self.gemini: Optional[GeminiService] = None
         self.strategy_store: Optional[StrategyStore] = None
         self._initialized = False
+        
+        # ICT Architecture Components
+        self.context_manager: Optional[MarketContextManager] = None
+        self.phase_detector: Optional[PhaseDetector] = None
+        self.prompt_builder: Optional[ICTPromptBuilder] = None
+        self.decision_validator: Optional[DecisionValidator] = None
+        self._previous_observations: dict = {}  # symbol -> ObservationResult
 
     async def initialize(self):
         """Initialize the agent's dependencies."""
@@ -117,407 +72,216 @@ Decision Guidelines:
 
         self.gemini = get_gemini_service()
         self.strategy_store = await get_strategy_store()
+        
+        # Initialize ICT components
+        self.context_manager = get_context_manager()
+        self.phase_detector = get_phase_detector()
+        self.prompt_builder = get_prompt_builder()
+        self.decision_validator = get_decision_validator()
+        
         self._initialized = True
 
-    async def analyze(
-        self,
-        observation: MarketObservation,
-        mode: Optional[Literal["verbose", "concise"]] = None
-    ) -> AgentDecision:
-        """
-        Analyze a market observation and produce a trading decision.
-
-        Args:
-            observation: Complete market observation from tools
-            mode: Reasoning mode ("verbose" for UI, "concise" for batch)
-
-        Returns:
-            AgentDecision with decision, reasoning, and rule citations
-        """
-        await self.initialize()
-
-        start_time = datetime.utcnow()
-        mode = mode or self.settings.reasoning_mode
-
-        # Step 1: Generate market summary for RAG query
-        market_summary = observation.to_summary()
-
-        # Step 2: Retrieve relevant strategies
-        strategy_context = await self.strategy_store.get_strategies_for_context(
-            market_summary,
-            k=5
-        )
-
-        # Step 3: Build prompt
-        prompt = self._build_prompt(observation, strategy_context)
-
-        # Step 4: Call LLM
-        response = await self.gemini.generate(
-            prompt=prompt,
-            mode=mode,
-            system_instruction=self.SYSTEM_INSTRUCTION,
-            temperature=0.3  # Lower temperature for more consistent decisions
-        )
-
-        end_time = datetime.utcnow()
-        latency_ms = int((end_time - start_time).total_seconds() * 1000)
-
-        # Step 5: Parse response
-        decision = self._parse_response(response, observation, mode, latency_ms)
-        decision.strategy_context = strategy_context[:500]  # Truncate for storage
-
-        return decision
-
-    async def analyze_snapshot(
+    # =========================================================================
+    # ICT ARCHITECTURE METHODS
+    # =========================================================================
+    
+    async def analyze_ict(
         self,
         htf_candles: List[dict],
         ltf_candles: List[dict],
         symbol: str,
         timestamp: Optional[datetime] = None,
-        mode: Optional[Literal["verbose", "concise"]] = None,
-        micro_candles: Optional[List[dict]] = None
-    ) -> tuple[MarketObservation, AgentDecision]:
+        mode: Optional[Literal["verbose", "concise"]] = None
+    ) -> tuple[ObservationResult, DomainAgentDecision]:
         """
-        Full analysis pipeline: observe → retrieve → reason → decide.
-
-        Convenience method that runs observation and analysis in one call.
-
+        Analyze market using the ICT architecture.
+        
+        This is the primary method for analysis. It uses:
+        1. Event-based observer (factual events)
+        2. Persistent context manager (stateful memory)
+        3. Phase detector (PO3 phases)
+        4. Dynamic prompt builder (ICT rulebook)
+        5. Decision validator (hard veto rules)
+        
         Args:
-            htf_candles: Higher timeframe candles
-            ltf_candles: Lower timeframe candles
-            symbol: Trading symbol
+            htf_candles: Higher timeframe candles (1H)
+            ltf_candles: Lower timeframe candles (15M)
+            symbol: Trading symbol (e.g., "EURUSD")
             timestamp: Analysis timestamp
             mode: Reasoning mode
-            micro_candles: Optional micro timeframe candles
-
+            
         Returns:
-            Tuple of (MarketObservation, AgentDecision)
+            Tuple of (ObservationResult, AgentDecision)
         """
-        # Run observation tools
-        observation = run_all_observations(
+        await self.initialize()
+        
+        start_time = datetime.utcnow()
+        mode = mode or self.settings.reasoning_mode
+        timestamp = timestamp or datetime.utcnow()
+        
+        # ==== STEP 1: OBSERVE (emit factual events) ====
+        previous_obs = self._previous_observations.get(symbol)
+        observation = run_event_observation(
             htf_candles=htf_candles,
             ltf_candles=ltf_candles,
             symbol=symbol,
             timestamp=timestamp,
-            micro_candles=micro_candles
+            previous_observation=previous_obs
         )
-
-        # Run agent analysis
-        decision = await self.analyze(observation, mode)
-
-        return observation, decision
-
-    async def analyze_breakout(
-        self,
-        symbol: str,
-        timestamp: datetime,
-        current_price: float,
-        candles_5m: List[dict],
-        mode: Optional[Literal["verbose", "concise"]] = None
-    ) -> tuple[BreakoutObservation, AgentDecision]:
-        """
-        Analyze market for Simple Breakout Strategy.
-
-        This uses the simplified breakout observation that only looks at:
-        - Previous and current 5-min candle data
-        - Session context (London/NY valid, Asian invalid)
-        - Breakout detection (break of high = SHORT, break of low = LONG)
-
-        Args:
-            symbol: Trading symbol (e.g., "EURUSD")
-            timestamp: Current timestamp
-            current_price: Current market price
-            candles_5m: List of 5-minute candles, most recent last
-            mode: Reasoning mode ("verbose" or "concise")
-
-        Returns:
-            Tuple of (BreakoutObservation, AgentDecision)
-        """
-        await self.initialize()
-
-        start_time = datetime.utcnow()
-        mode = mode or self.settings.reasoning_mode
-
-        # Step 1: Run breakout observation
-        observation = run_breakout_observation(
+        self._previous_observations[symbol] = observation
+        
+        # ==== STEP 2: UPDATE CONTEXT ====
+        context = self.context_manager.update_from_observation(
             symbol=symbol,
-            timestamp=timestamp,
-            current_price=current_price,
-            candles_5m=candles_5m
+            observation_data=observation.raw_data,
+            events=observation.events
         )
-
-        # Step 2: Retrieve relevant strategies
-        market_summary = observation.to_summary()
-        strategy_context = await self.strategy_store.get_strategies_for_context(
-            market_summary,
-            k=3
+        
+        # ==== STEP 3: DETECT PHASE ====
+        phase, phase_confidence, phase_reason = self.phase_detector.detect_phase(
+            context=context,
+            recent_events=observation.events
         )
-
-        # Step 3: Build prompt
-        prompt = self._build_breakout_prompt(observation, strategy_context)
-
-        # Step 4: Call LLM
+        context.phase.transition_to(phase, phase_reason, phase_confidence)
+        
+        # ==== STEP 4: BUILD PROMPT ====
+        system_prompt = self.prompt_builder.build_system_prompt(context)
+        analysis_prompt = self.prompt_builder.build_analysis_prompt(
+            observation_summary=observation.to_summary(),
+            context=context
+        )
+        
+        # ==== STEP 5: CALL LLM (proposes decision) ====
+        llm_start = datetime.utcnow()
         response = await self.gemini.generate(
-            prompt=prompt,
+            prompt=analysis_prompt,
             mode=mode,
-            system_instruction=self.SYSTEM_INSTRUCTION,
+            system_instruction=system_prompt,
             temperature=0.3
         )
-
-        end_time = datetime.utcnow()
-        latency_ms = int((end_time - start_time).total_seconds() * 1000)
-
-        # Step 5: Parse response
-        decision = self._parse_breakout_response(response, observation, mode, latency_ms)
-        decision.strategy_context = strategy_context[:500]
-
-        return observation, decision
-
-    def _build_breakout_prompt(
-        self,
-        observation: BreakoutObservation,
-        strategy_context: str
-    ) -> str:
-        """Build the analysis prompt for the breakout strategy."""
-
-        prompt_parts = [
-            "# Simple Breakout Strategy Analysis",
-            "",
-            f"**Symbol**: {observation.symbol}",
-            f"**Time**: {observation.timestamp.strftime('%Y-%m-%d %H:%M')} UTC",
-            f"**Current Price**: {observation.current_price:.5f}",
-            "",
-            "---",
-            "",
-            "## Market Observations",
-            "",
-            observation.to_summary(),
-            "",
-            "---",
-            "",
-            "## Strategy Rules",
-            "",
-            strategy_context,
-            "",
-            "---",
-            "",
-            "## Your Task",
-            "",
-            "Based on the observations above:",
-            "",
-            "1. Check if the current 5-min candle has CLOSED above the previous candle HIGH (→ SHORT)",
-            "2. Check if the current 5-min candle has CLOSED below the previous candle LOW (→ LONG)",
-            "3. Verify the session is valid (London/New York - NOT Asian)",
-            "4. Make a decision: TRADE, WAIT, or NO_TRADE",
-            "",
-            "If TRADE, provide entry at current price, stop loss, and take profit.",
-            "",
-        ]
-
-        return "\n".join(prompt_parts)
-
-    def _parse_breakout_response(
+        llm_latency = int((datetime.utcnow() - llm_start).total_seconds() * 1000)
+        
+        # ==== STEP 6: PARSE LLM RESPONSE ====
+        proposed = self._parse_llm_response_to_proposed(response, llm_latency)
+        
+        # ==== STEP 7: VALIDATE (hard veto rules) ====
+        validation = self.decision_validator.validate(
+            proposed=proposed,
+            context=context,
+            observation_data=observation.raw_data
+        )
+        
+        # ==== STEP 8: CREATE FINAL DECISION ====
+        final_decision = self.decision_validator.create_final_decision(
+            proposed=proposed,
+            validation=validation,
+            context=context
+        )
+        
+        # Record in context
+        context.record_decision(final_decision.decision, final_decision.confidence)
+        
+        # Calculate total latency
+        total_latency = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        final_decision.total_latency_ms = total_latency
+        
+        return observation, final_decision
+    
+    def _parse_llm_response_to_proposed(
         self,
         response: dict,
-        observation: BreakoutObservation,
-        mode: str,
-        latency_ms: int
-    ) -> AgentDecision:
-        """Parse LLM response for breakout strategy."""
-
+        llm_latency_ms: int
+    ) -> ProposedDecision:
+        """Parse LLM response into ProposedDecision."""
         content = response.get("content", "")
         parsed = response.get("parsed")
-
-        # Default decision
-        decision = AgentDecision(
-            decision="NO_TRADE",
-            confidence=0.0,
-            observation_hash=observation.state_hash,
-            latency_ms=latency_ms,
-            mode=mode
-        )
-
-        if parsed:
-            decision.decision = parsed.get("decision", "NO_TRADE")
-            decision.confidence = float(parsed.get("confidence", 0.0))
-
-            # Filter rule citations
-            raw_citations = parsed.get("rule_citations", [])
-            valid_citations = []
-            for citation in raw_citations:
-                if isinstance(citation, str):
-                    import re
-                    if re.match(r'^\d+\.\d+$', citation):
-                        valid_citations.append(citation)
-
-            decision.rule_citations = valid_citations
-            decision.setup = parsed.get("setup")
-            decision.brief_reason = parsed.get("brief_reason", "")
-
-            # Auto-generate setup if breakout detected and decision is TRADE
-            if decision.decision == "TRADE" and observation.breakout_detected and not decision.setup:
-                decision.setup = get_breakout_entry_exit(
-                    direction=observation.breakout_direction,
-                    entry_price=observation.current_price,
-                    prev_candle=observation.previous_candle
-                )
-
-        if mode == "verbose":
-            decision.reasoning = content
-
-        return decision
-
-    def _build_prompt(
-        self,
-        observation: MarketObservation,
-        strategy_context: str
-    ) -> str:
-        """Build the analysis prompt for the LLM."""
-
-        prompt_parts = [
-            "# Market Analysis Request",
-            "",
-            f"**Symbol**: {observation.symbol}",
-            f"**Time**: {observation.timestamp.strftime('%Y-%m-%d %H:%M')} UTC",
-            f"**Current Price**: {observation.current_price:.5f}",
-            "",
-            "---",
-            "",
-            "## Current Market Observations",
-            "",
-            observation.to_summary(),
-            "",
-            "---",
-            "",
-            "## Relevant Strategy Rules",
-            "",
-            strategy_context,
-            "",
-            "---",
-            "",
-            "## Your Task",
-            "",
-            "Based on the observations above and the strategy rules provided:",
-            "",
-            "1. Analyze whether the current market conditions align with the breakout strategy",
-            "2. Check if 5-min candle breaks previous candle high (SHORT) or low (LONG)",
-            "3. Make a decision: TRADE, WAIT, or NO_TRADE",
-            "4. If TRADE, provide specific entry, stop loss, and take profit levels",
-            "5. Cite the specific rule numbers that support your decision",
-            "",
-            "Remember: Be conservative. Only recommend TRADE when you have strong confluence.",
-        ]
-
-        return "\n".join(prompt_parts)
-
-    def _parse_response(
-        self,
-        response: dict,
-        observation: MarketObservation,
-        mode: str,
-        latency_ms: int
-    ) -> AgentDecision:
-        """Parse LLM response into AgentDecision."""
-
-        content = response.get("content", "")
-        parsed = response.get("parsed")
-
-        # Default decision
-        decision = AgentDecision(
-            decision="NO_TRADE",
-            confidence=0.0,
-            observation_hash=observation.state_hash,
-            latency_ms=latency_ms,
-            mode=mode
-        )
-
+        
         if parsed:
             # Successfully parsed JSON
-            decision.decision = parsed.get("decision", "NO_TRADE")
-            decision.confidence = float(parsed.get("confidence", 0.0))
-
-            # Filter rule citations to only valid rule IDs (like 1.1, 6.5, etc)
-            raw_citations = parsed.get("rule_citations", [])
-            valid_citations = []
-            for citation in raw_citations:
-                if isinstance(citation, str):
-                    # Must be a valid rule ID pattern (1-2 digits, dot, 1-2 digits)
-                    import re
-                    if re.match(r'^\d{1,2}\.\d{1,2}$', citation):
-                        valid_citations.append(citation)
-            decision.rule_citations = valid_citations
-
-            decision.brief_reason = parsed.get("brief_reason", "")
-            decision.setup = parsed.get("setup")
-
-            if mode == "verbose":
-                decision.reasoning = content
-        else:
-            # Fallback: try to extract decision from text
-            content_upper = content.upper()
-
-            if "TRADE" in content_upper and "NO_TRADE" not in content_upper and "WAIT" not in content_upper:
-                decision.decision = "TRADE"
-                decision.confidence = 0.5
-            elif "WAIT" in content_upper:
-                decision.decision = "WAIT"
-                decision.confidence = 0.5
-            else:
-                decision.decision = "NO_TRADE"
-                decision.confidence = 0.3
-
-            decision.reasoning = content
-            # Show the full LLM output when JSON parsing fails
-            decision.brief_reason = content
-
-            # Try to extract rule citations - only valid rule ID patterns
+            setup = None
+            if parsed.get("setup"):
+                setup_data = parsed["setup"]
+                setup = TradeSetup(
+                    direction=setup_data.get("direction", "LONG"),
+                    entry_price=float(setup_data.get("entry_price", 0)),
+                    stop_loss=float(setup_data.get("stop_loss", 0)),
+                    take_profit=float(setup_data.get("take_profit", 0)),
+                    entry_model=setup_data.get("entry_model", ""),
+                    pd_array_type=setup_data.get("pd_array_type", "")
+                )
+            
+            # Filter rule citations to valid IDs
             import re
-            # Only match patterns like 1.1, 6.5, 8.1 (not prices like 1.08628)
-            rule_pattern = r'\b([1-9]\.\d{1,2})\b'
-            rules = re.findall(rule_pattern, content)
-            decision.rule_citations = list(set(rules))[:5]
-
-        return decision
-
-    async def explain_decision(
-        self,
-        decision: AgentDecision,
-        observation: MarketObservation
-    ) -> str:
-        """
-        Generate a detailed explanation of a decision for the UI.
-
-        Useful when the original decision was made in concise mode
-        but the user wants more details.
-        """
-        await self.initialize()
-
-        prompt = f"""
-Please explain in detail why this trading decision was made:
-
-**Decision**: {decision.decision}
-**Confidence**: {decision.confidence:.0%}
-**Rules Cited**: {', '.join(decision.rule_citations) if decision.rule_citations else 'None'}
-**Brief Reason**: {decision.brief_reason}
-
-The market conditions were:
-{observation.to_summary()}
-
-Explain step by step:
-1. What the 5-minute candle structure shows
-2. Whether the previous candle high/low was broken
-3. Whether we are in a valid trading session (London/New York)
-4. Why this decision aligns (or doesn't align) with the Simple Breakout Strategy
-"""
-
-        response = await self.gemini.generate(
-            prompt=prompt,
-            mode="verbose",
-            system_instruction=self.SYSTEM_INSTRUCTION,
-            temperature=0.5
+            raw_citations = parsed.get("rule_citations", [])
+            valid_citations = [
+                c for c in raw_citations
+                if isinstance(c, str) and re.match(r'^\d{1,2}\.\d{1,2}$', c)
+            ]
+            
+            return ProposedDecision(
+                decision=parsed.get("decision", "NO_TRADE"),
+                confidence=float(parsed.get("confidence", 0.5)),
+                reasoning=content if self.settings.reasoning_mode == "verbose" else "",
+                brief_reason=parsed.get("brief_reason", ""),
+                rule_citations=valid_citations,
+                setup=setup,
+                context_update=parsed.get("context_update", ""),
+                llm_latency_ms=llm_latency_ms
+            )
+        
+        # Fallback: couldn't parse JSON
+        return ProposedDecision(
+            decision="NO_TRADE",
+            confidence=0.3,
+            reasoning=content,
+            brief_reason="LLM response could not be parsed",
+            llm_latency_ms=llm_latency_ms
         )
-
-        return response.get("content", "Unable to generate explanation")
+    
+    async def analyze_ict_snapshot(
+        self,
+        htf_candles: List[dict],
+        ltf_candles: List[dict],
+        symbol: str,
+        timestamp: Optional[datetime] = None
+    ) -> dict:
+        """
+        Quick ICT analysis returning a summary dict for API responses.
+        
+        Convenience method for API endpoints.
+        """
+        observation, decision = await self.analyze_ict(
+            htf_candles=htf_candles,
+            ltf_candles=ltf_candles,
+            symbol=symbol,
+            timestamp=timestamp
+        )
+        
+        return {
+            "symbol": symbol,
+            "timestamp": observation.timestamp.isoformat(),
+            "decision": decision.decision,
+            "confidence": decision.confidence,
+            "brief_reason": decision.brief_reason,
+            "phase": decision.phase_at_decision,
+            "validated": decision.validation.approved if decision.validation else True,
+            "veto_reasons": [v.value for v in decision.validation.veto_reasons] if decision.validation else [],
+            "events_count": len(observation.events),
+            "latency_ms": decision.total_latency_ms
+        }
+    
+    def get_context(self, symbol: str):
+        """Get the persistent context for a symbol."""
+        if self.context_manager:
+            return self.context_manager.get_context(symbol)
+        return None
+    
+    def reset_context(self, symbol: str):
+        """Reset the context for a symbol."""
+        if self.context_manager:
+            self.context_manager.reset_context(symbol)
+        if symbol in self._previous_observations:
+            del self._previous_observations[symbol]
 
 
 # Singleton instance
