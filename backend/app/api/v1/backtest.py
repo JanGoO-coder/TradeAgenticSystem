@@ -7,14 +7,46 @@ Uses the ICT Architecture for market analysis.
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 import json
 import asyncio
+import traceback
 
 from app.services.smart_backtest_service import get_smart_backtest_service
 
 router = APIRouter(prefix="/backtest", tags=["Backtesting"])
+
+
+def _trade_status_from_result(result: Optional[str]) -> str:
+    """Map backend trade result enum to frontend-friendly status."""
+    mapping = {
+        "OPEN": "open",
+        "WIN": "won",
+        "LOSS": "lost",
+        "BREAKEVEN": "breakeven",
+        "SKIPPED": "skipped",
+    }
+    return mapping.get((result or "").upper(), "open")
+
+
+def _create_batch_streaming_response(step_size: int, max_concurrent: int) -> StreamingResponse:
+    """Create SSE response for batch backtest progress."""
+
+    async def event_stream():
+        service = await get_smart_backtest_service()
+
+        async for event in service.run_ict_batch(
+            step_size=step_size,
+            max_concurrent=max_concurrent,
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+            await asyncio.sleep(0.01)  # Small delay for buffering
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream"
+    )
 
 
 # ============================================================================
@@ -114,15 +146,17 @@ async def create_session(request: CreateSessionRequest) -> dict:
 
 
 @router.get("/session")
-async def get_current_session() -> dict:
+async def get_current_session() -> Optional[dict]:
     """
     Get the current active session.
+
+    Returns null when no active session exists.
     """
     service = await get_smart_backtest_service()
     session = service.get_session()
 
     if not session:
-        raise HTTPException(status_code=404, detail="No active session")
+        return None
 
     return session.to_dict()
 
@@ -180,17 +214,19 @@ async def save_current_session() -> dict:
 # ============================================================================
 
 @router.post("/step/forward")
-async def step_forward(request: StepRequest = StepRequest()) -> dict:
+async def step_forward(request: Optional[StepRequest] = None) -> dict:
     """
     Step forward in time and run analysis.
     """
     try:
         service = await get_smart_backtest_service()
-        result = await service.step_forward(request.bars)
+        bars = request.bars if request else 1
+        result = await service.step_forward(bars)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        traceback.print_exc()
         error_msg = str(e)
         # Check for rate limit errors
         if "429" in error_msg or "quota" in error_msg.lower() or "rate" in error_msg.lower():
@@ -202,13 +238,14 @@ async def step_forward(request: StepRequest = StepRequest()) -> dict:
 
 
 @router.post("/step/backward")
-async def step_backward(request: StepRequest = StepRequest()) -> dict:
+async def step_backward(request: Optional[StepRequest] = None) -> dict:
     """
     Step backward in time.
     """
     try:
         service = await get_smart_backtest_service()
-        result = service.step_backward(request.bars)
+        bars = request.bars if request else 1
+        result = service.step_backward(bars)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -241,7 +278,7 @@ async def get_snapshot() -> dict:
 
 @router.post("/analyze")
 async def analyze_current_position(
-    mode: str = Query("verbose", description="verbose or concise")
+    mode: Literal["verbose", "concise"] = Query("verbose", description="verbose or concise")
 ) -> dict:
     """
     Run ICT Architecture analysis at current position.
@@ -261,7 +298,7 @@ async def analyze_current_position(
 
         observation, decision = await service.analyze_ict_at_index(
             session.current_index,
-            mode=mode,
+            mode="verbose" if mode == "verbose" else "concise",
             force=True  # Always analyze when explicitly requested
         )
 
@@ -272,6 +309,10 @@ async def analyze_current_position(
             "phase": decision.extra.get("phase") if decision.extra else None,
             "validated": decision.extra.get("validated") if decision.extra else True,
             "veto_reasons": decision.extra.get("veto_reasons") if decision.extra else [],
+            "hub_status": decision.extra.get("hub_status") if decision.extra else None,
+            "confluences": decision.extra.get("confluences") if decision.extra else [],
+            "vetoes": decision.extra.get("vetoes") if decision.extra else [],
+            "call_metrics": decision.extra.get("call_metrics") if decision.extra else {},
             "decision": decision.to_dict()
         }
     except HTTPException:
@@ -289,7 +330,7 @@ async def analyze_current_position(
 # ============================================================================
 
 @router.post("/run")
-async def run_batch_backtest(request: RunBatchRequest = RunBatchRequest()):
+async def run_batch_backtest(request: Optional[RunBatchRequest] = None):
     """
     Run batch backtest using ICT Architecture with streaming progress.
 
@@ -306,19 +347,22 @@ async def run_batch_backtest(request: RunBatchRequest = RunBatchRequest()):
     - completed: Final results with validation stats
     - error: Error occurred
     """
-    async def event_stream():
-        service = await get_smart_backtest_service()
+    payload = request or RunBatchRequest(step_size=1, max_concurrent=10)
+    return _create_batch_streaming_response(
+        step_size=payload.step_size,
+        max_concurrent=payload.max_concurrent,
+    )
 
-        async for event in service.run_ict_batch(
-            step_size=request.step_size,
-            max_concurrent=request.max_concurrent
-        ):
-            yield f"data: {json.dumps(event)}\n\n"
-            await asyncio.sleep(0.01)  # Small delay for buffering
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream"
+@router.get("/run")
+async def run_batch_backtest_stream(
+    step_size: int = Query(1, ge=1, description="Candles per step"),
+    max_concurrent: int = Query(10, ge=1, description="Max parallel calls"),
+):
+    """Run batch backtest stream (SSE GET variant for EventSource clients)."""
+    return _create_batch_streaming_response(
+        step_size=step_size,
+        max_concurrent=max_concurrent,
     )
 
 
@@ -337,6 +381,23 @@ async def get_results() -> dict:
     if not session:
         raise HTTPException(status_code=404, detail="No active session")
 
+    decisions_by_index = {
+        d.index: d for d in session.decisions
+    }
+
+    normalized_trades = []
+    for trade in session.trades:
+        trade_dict = trade.to_dict()
+        linked_decision = decisions_by_index.get(trade.decision_index)
+
+        take_profit = trade_dict.get("take_profit")
+        trade_dict["id"] = trade_dict.get("trade_id")
+        trade_dict["status"] = _trade_status_from_result(trade_dict.get("result"))
+        trade_dict["take_profits"] = [take_profit] if take_profit is not None else []
+        trade_dict["rule_citations"] = linked_decision.rule_citations if linked_decision else []
+
+        normalized_trades.append(trade_dict)
+
     return {
         "session_id": session.session_id,
         "status": session.status,
@@ -344,7 +405,7 @@ async def get_results() -> dict:
         "decisions_count": len(session.decisions),
         "trades_count": len(session.trades),
         "performance": session.performance.to_dict(),
-        "trades": [t.to_dict() for t in session.trades]
+        "trades": normalized_trades
     }
 
 
@@ -359,8 +420,30 @@ async def get_equity_curve() -> dict:
     if not session:
         raise HTTPException(status_code=404, detail="No active session")
 
+    raw_curve = session.performance.equity_curve or [0.0]
+    closed_trades = [
+        trade for trade in session.trades
+        if trade.exit_time is not None
+    ]
+
+    curve_points = []
+    for i, equity in enumerate(raw_curve):
+        if i == 0:
+            ts = session.start_date or session.created_at
+        else:
+            trade_idx = min(i - 1, len(closed_trades) - 1)
+            if trade_idx >= 0:
+                ts = closed_trades[trade_idx].exit_time or session.created_at
+            else:
+                ts = session.created_at
+
+        curve_points.append({
+            "timestamp": ts.isoformat(),
+            "equity": float(equity),
+        })
+
     return {
-        "curve": session.performance.equity_curve,
+        "curve": curve_points,
         "max_drawdown_r": session.performance.max_drawdown_r,
         "total_pnl_r": session.performance.total_pnl_r
     }

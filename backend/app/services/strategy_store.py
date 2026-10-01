@@ -12,7 +12,7 @@ from typing import Optional
 from datetime import datetime
 
 from app.core.config import get_settings
-from app.services.llm_service import get_gemini_service
+from app.services.llm_service import get_llm_service
 from app.services.vector_store import get_vector_store, VectorStoreService
 
 
@@ -54,13 +54,13 @@ class StrategyStore:
     - Scans rules/ directory for .md files
     - Parses by headers (##, ###) to create semantic chunks
     - Extracts rule IDs (e.g., "Rule 6.5", "6.1") for exact lookup
-    - Embeds chunks via Gemini and stores in ChromaDB
+    - Embeds chunks via the configured LLM service and stores in ChromaDB
     - Provides semantic search and exact rule lookup
     """
 
     def __init__(self):
         self.settings = get_settings()
-        self.gemini = get_gemini_service()
+        self.llm = get_llm_service()
         self.vector_store: Optional[VectorStoreService] = None
 
         self._indexed_files: dict[str, datetime] = {}
@@ -184,7 +184,7 @@ class StrategyStore:
         for i in range(0, len(documents), batch_size):
             batch = documents[i:i + batch_size]
             try:
-                embeddings = await self.gemini.embed(batch)
+                embeddings = await self.llm.embed(batch)
                 all_embeddings.extend(embeddings)
                 print(f"  Embedded {min(i + batch_size, len(documents))}/{len(documents)}")
             except Exception as e:
@@ -329,7 +329,7 @@ class StrategyStore:
 
         try:
             # Generate query embedding
-            query_embedding = await self.gemini.embed_query(query)
+            query_embedding = await self.llm.embed_query(query)
 
             # Build filter if specified
             where = None

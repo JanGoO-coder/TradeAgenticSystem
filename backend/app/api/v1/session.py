@@ -4,6 +4,8 @@ from datetime import datetime
 
 from app.domain.responses import SessionInfoResponse, KillZoneStatusResponse
 from app.agent.engine import get_agent_engine, TradingAgentEngine
+from app.core.config import get_settings
+from app.hub.tools import get_session_window, utc_to_est_hhmm
 
 router = APIRouter(tags=["Session"])
 
@@ -21,6 +23,18 @@ async def get_current_session(
     - Current time in UTC and EST
     """
     now = datetime.utcnow()
+    settings = get_settings()
+    if settings.hub_enabled:
+        session_info = get_session_window(now)
+        return SessionInfoResponse(
+            session="London" if session_info["session"] == "London kill zone" else "NY" if session_info["session"] == "NY kill zone" else "Off-Hours",
+            kill_zone_active=session_info["in_killzone"],
+            kill_zone_name=session_info["session"] if session_info["in_killzone"] else None,
+            time_until_next_zone=None,
+            current_time_utc=now.isoformat() + "Z",
+            current_time_est=utc_to_est_hhmm(now),
+        )
+
     session_info = engine.get_current_session(now)
     
     return SessionInfoResponse(
@@ -45,6 +59,15 @@ async def get_killzone_status(
     - NY: 7:00 AM - 10:00 AM EST (12:00-15:00 UTC)
     """
     now = datetime.utcnow()
+    settings = get_settings()
+    if settings.hub_enabled:
+        session_info = get_session_window(now)
+        return KillZoneStatusResponse(
+            in_kill_zone=session_info["in_killzone"],
+            session=session_info["session"] if session_info["in_killzone"] else None,
+            rule_refs=["8.1"],
+        )
+
     session_info = engine.get_current_session(now)
     
     return KillZoneStatusResponse(

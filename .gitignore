@@ -49,3 +49,14 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
+backend/data/tick_cache/EURUSD/1H_20260408_20260410.meta
+backend/data/tick_cache/EURUSD/1H_20260407_20260414.parquet
+backend/data/tick_cache/EURUSD/1H_20260407_20260414.meta
+backend/data/tick_cache/EURUSD/1H_20260407_20260410.parquet
+backend/data/tick_cache/EURUSD/1H_20260407_20260410.meta
+backend/data/tick_cache/EURUSD/15M_20260408_20260410.parquet
+backend/data/tick_cache/EURUSD/15M_20260408_20260410.meta
+backend/data/tick_cache/EURUSD/15M_20260407_20260414.parquet
+backend/data/tick_cache/EURUSD/15M_20260407_20260414.meta
+backend/data/tick_cache/EURUSD/15M_20260407_20260410.parquet
+backend/data/tick_cache/EURUSD/15M_20260407_20260410.meta

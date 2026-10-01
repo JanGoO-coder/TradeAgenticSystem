@@ -83,9 +83,10 @@ async def connect_mt5(request: MT5ConnectionRequest) -> Dict:
     success = mt5_service.connect(login, password, server)
 
     if not success:
+        detail = mt5_service.last_error or "Failed to connect to MT5. Ensure MT5 terminal is running."
         raise HTTPException(
             status_code=500,
-            detail="Failed to connect to MT5. Ensure MT5 terminal is running."
+            detail=detail
         )
 
     return {

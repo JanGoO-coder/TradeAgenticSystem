@@ -6,16 +6,16 @@ decision logging, and trade simulation.
 """
 import asyncio
 import json
-import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, AsyncGenerator
+from typing import Any, List, Dict, Optional, AsyncGenerator, Literal
 import logging
 
 from app.core.config import get_settings
 from app.services.mt5_service import get_mt5_service
-from app.agent.main_agent import get_main_agent, MainAgent
-from app.tools.observer import run_event_observation
+from app.hub.master_agent import get_master_agent, MasterTradingAgent
+from app.domain.hub import HubDecisionRequest
+from app.domain.hub import HubOpenTrade
 from app.domain.observation import ObservationResult
 from app.domain.backtest import (
     BacktestSession,
@@ -23,9 +23,6 @@ from app.domain.backtest import (
     BacktestTrade,
     TradeResult
 )
-
-# ICT Architecture imports
-from app.domain.observation import ObservationResult
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +41,7 @@ class SmartBacktestService:
     def __init__(self):
         self.settings = get_settings()
         self.mt5 = get_mt5_service()
-        self._agent: Optional[MainAgent] = None
+        self._agent: Optional[MasterTradingAgent] = None
 
         # Data storage
         self._data: Dict[str, List[Dict]] = {}
@@ -60,7 +57,7 @@ class SmartBacktestService:
     async def initialize(self):
         """Initialize agent dependency."""
         if self._agent is None:
-            self._agent = await get_main_agent()
+            self._agent = await get_master_agent()
 
     # =========================================================================
     # Data Loading
@@ -88,7 +85,7 @@ class SmartBacktestService:
         if success:
             logger.info("MT5 auto-connect successful")
         else:
-            logger.error("MT5 auto-connect failed")
+            logger.error(f"MT5 auto-connect failed: {self.mt5.last_error}")
 
         return success
 
@@ -97,7 +94,7 @@ class SmartBacktestService:
         symbol: str,
         from_date: datetime,
         to_date: datetime,
-        timeframes: List[str] = None
+        timeframes: List[str] | None = None
     ) -> Dict:
         """
         Load historical data for backtesting from MT5.
@@ -124,9 +121,10 @@ class SmartBacktestService:
 
         # Ensure MT5 is connected (auto-connect if needed)
         if not self._ensure_mt5_connected():
+            error_detail = self.mt5.last_error or "Unknown MT5 error"
             raise ValueError(
                 "MT5 not connected. Please ensure MetaTrader 5 terminal is running "
-                "and credentials are configured in environment variables."
+                f"and credentials are configured in environment variables. Details: {error_detail}"
             )
 
         # Check data availability before loading
@@ -318,7 +316,7 @@ class SmartBacktestService:
     async def analyze_ict_at_index(
         self,
         index: int,
-        mode: str = "concise",
+        mode: Literal["verbose", "concise"] = "concise",
         force: bool = False
     ) -> tuple[ObservationResult, BacktestDecision]:
         """
@@ -370,49 +368,117 @@ class SmartBacktestService:
             logger.warning(f"Could not parse timestamp {time_str}: {e}")
             timestamp = datetime.now()
 
-        # Run ICT analysis via new architecture
-        observation, agent_decision = await self._agent.analyze_ict(
-            htf_candles=candles["htf"],
-            ltf_candles=candles["ltf"],
+        if self._agent is None:
+            raise ValueError("Master hub agent is not initialized")
+
+        account_balance = 10000.0 + (session.performance.total_pnl_r * 100.0)
+        open_trades: List[Dict[str, Any]] = []
+        for trade in session.trades:
+            if trade.result != TradeResult.OPEN:
+                continue
+            open_trades.append(
+                {
+                    "symbol": session.symbol,
+                    "direction": trade.direction,
+                    "entry": trade.entry_price,
+                    "stop_loss": trade.stop_loss,
+                    "take_profit": trade.take_profit,
+                    "current_price": current_candle.get("close"),
+                    "moved_to_be": False,
+                    "trailing_active": False,
+                }
+            )
+        open_trade_models: List[HubOpenTrade] = [HubOpenTrade(**t) for t in open_trades]
+
+        timeframe_bars = {
+            "1H": candles.get("htf", []),
+            "15M": candles.get("ltf", []),
+            "5M": candles.get("micro", []),
+            "D1": candles.get("htf", []),
+            "H4": candles.get("htf", []),
+            "M1": candles.get("micro", []),
+        }
+
+        hub_request = HubDecisionRequest(
             symbol=session.symbol,
             timestamp=timestamp,
-            mode=mode
+            timeframe_bars=timeframe_bars,
+            account_balance=account_balance,
+            risk_pct=self.settings.hub_risk_per_trade_pct,
+            open_trades=list(open_trade_models),
+            force_recompute=force,
         )
+        hub_decision = await self._agent.decision_cycle(hub_request)
 
-        # Convert TradeSetup to dict if present
-        setup_dict = None
-        if agent_decision.setup:
-            setup = agent_decision.setup
+        if hub_decision.status == "active":
+            decision_type = "TRADE"
+            confidence = 0.85
+        elif hub_decision.status == "pending":
+            decision_type = "WAIT"
+            confidence = 0.6
+        else:
+            decision_type = "NO_TRADE"
+            confidence = 0.35
+
+        setup_dict: Optional[Dict[str, Any]] = None
+        if (
+            hub_decision.status == "active"
+            and hub_decision.entry is not None
+            and hub_decision.sl is not None
+            and hub_decision.tp is not None
+        ):
             setup_dict = {
-                "direction": setup.direction,
-                "entry": setup.entry_price,
-                "stop_loss": setup.stop_loss,
-                "take_profit": setup.take_profit,
-                "entry_model": setup.entry_model,
-                "pd_array_type": setup.pd_array_type
+                "direction": "LONG" if hub_decision.bias == "bullish" else "SHORT",
+                "entry": hub_decision.entry,
+                "stop_loss": hub_decision.sl,
+                "take_profit": hub_decision.tp,
+                "entry_model": "hub_master_agent",
+                "pd_array_type": hub_decision.poi or "unknown",
             }
+
+        raw_data = {
+            "hub": hub_decision.model_dump(),
+            "htf_bias": {"bias": hub_decision.bias.upper()},
+            "ltf_alignment": {"aligned": "poi_aligned" in hub_decision.confluences},
+            "killzone": {"in_killzone": "killzone_valid" in hub_decision.confluences},
+            "premium_discount": {"zone": "UNKNOWN", "percentage": 0.5},
+            "sweeps": [],
+            "fvgs": [],
+        }
+        observation = ObservationResult(
+            symbol=session.symbol,
+            timestamp=timestamp,
+            current_price=float(current_candle.get("close", 0.0)),
+            events=[],
+            raw_data=raw_data,
+        )
 
         # Build BacktestDecision
         decision = BacktestDecision(
             index=index,
             timestamp=timestamp,
-            decision=agent_decision.decision,
-            confidence=agent_decision.confidence,
-            brief_reason=agent_decision.brief_reason,
-            rule_citations=agent_decision.rule_citations,
+            decision=decision_type,
+            confidence=confidence,
+            brief_reason=hub_decision.reason,
+            rule_citations=(hub_decision.confluences + hub_decision.vetoes)[:8],
             setup=setup_dict,
-            observation_hash=observation.state_hash,
+            observation_hash=hub_decision.metadata.get("state_hash", observation.state_hash),
             price_at_decision=observation.current_price,
-            latency_ms=agent_decision.total_latency_ms,
-            skipped=False
+            latency_ms=0,
+            skipped=False,
         )
 
-        # Add extra ICT context (validation result, phase)
         decision.extra = {
-            "phase": agent_decision.phase_at_decision,
-            "validated": agent_decision.validation.approved if agent_decision.validation else True,
-            "veto_reasons": [v.value for v in agent_decision.validation.veto_reasons] if agent_decision.validation else [],
-            "events_count": len(observation.events)
+            "phase": None,
+            "validated": hub_decision.status != "no-trade",
+            "veto_reasons": hub_decision.vetoes,
+            "events_count": len(observation.events),
+            "hub_status": hub_decision.status,
+            "confluences": hub_decision.confluences,
+            "vetoes": hub_decision.vetoes,
+            "hub_decision": hub_decision.model_dump(),
+            "llm_called": hub_decision.llm_called,
+            "call_metrics": hub_decision.call_metrics.model_dump(),
         }
 
         # Update session
@@ -420,7 +486,7 @@ class SmartBacktestService:
         session.add_decision(decision)
 
         # Handle trade setup (only if validated/approved)
-        is_approved = agent_decision.validation.approved if agent_decision.validation else True
+        is_approved = hub_decision.status == "active"
         if decision.decision == "TRADE" and decision.setup and is_approved:
             await self._open_trade(decision, session)
 
@@ -429,6 +495,8 @@ class SmartBacktestService:
     async def _open_trade(self, decision: BacktestDecision, session: BacktestSession):
         """Open a new trade based on agent decision."""
         setup = decision.setup
+        if not isinstance(setup, dict):
+            return
 
         trade = BacktestTrade(
             decision_index=decision.index,
@@ -550,6 +618,8 @@ class SmartBacktestService:
 
         try:
             index = 50  # Start after enough history
+            llm_calls_total = 0
+            cache_hits_total = 0
 
             while index < session.total_candles:
                 # Check for trade exits first
@@ -568,6 +638,12 @@ class SmartBacktestService:
                         index, mode="concise"
                     )
 
+                    if decision.extra:
+                        call_metrics = decision.extra.get("call_metrics", {})
+                        if isinstance(call_metrics, dict):
+                            llm_calls_total += int(call_metrics.get("llm_calls", 0) or 0)
+                            cache_hits_total += int(call_metrics.get("cache_hits", 0) or 0)
+
                     session.update_progress(index)
 
                     # Yield progress every 10 candles or on decisions
@@ -578,8 +654,12 @@ class SmartBacktestService:
                             "progress": session.progress,
                             "decision": decision.decision,
                             "skipped": decision.skipped,
+                            "hub_status": decision.extra.get("hub_status") if decision.extra else None,
+                            "call_metrics": decision.extra.get("call_metrics") if decision.extra else {},
                             "total_decisions": len(session.decisions),
-                            "total_trades": len(session.trades)
+                            "total_trades": len(session.trades),
+                            "llm_calls_total": llm_calls_total,
+                            "cache_hits_total": cache_hits_total,
                         }
 
                 except Exception as e:
@@ -623,6 +703,10 @@ class SmartBacktestService:
                 "event": "completed",
                 "session_id": session.session_id,
                 "performance": session.performance.to_dict(),
+                "efficiency": {
+                    "llm_calls": llm_calls_total,
+                    "cache_hits": cache_hits_total,
+                },
                 "saved_to": path
             }
 
@@ -673,6 +757,8 @@ class SmartBacktestService:
             index = 50  # Start after enough history
             vetoed_count = 0
             approved_count = 0
+            llm_calls_total = 0
+            cache_hits_total = 0
 
             while index < session.total_candles:
                 # Check for trade exits first
@@ -697,6 +783,10 @@ class SmartBacktestService:
                             approved_count += 1
                         else:
                             vetoed_count += 1
+                        call_metrics = decision.extra.get("call_metrics", {})
+                        if isinstance(call_metrics, dict):
+                            llm_calls_total += int(call_metrics.get("llm_calls", 0) or 0)
+                            cache_hits_total += int(call_metrics.get("cache_hits", 0) or 0)
 
                     session.update_progress(index)
 
@@ -709,10 +799,14 @@ class SmartBacktestService:
                             "decision": decision.decision,
                             "phase": decision.extra.get("phase") if decision.extra else None,
                             "validated": decision.extra.get("validated") if decision.extra else True,
+                            "hub_status": decision.extra.get("hub_status") if decision.extra else None,
+                            "call_metrics": decision.extra.get("call_metrics") if decision.extra else {},
                             "total_decisions": len(session.decisions),
                             "total_trades": len(session.trades),
                             "approved_count": approved_count,
-                            "vetoed_count": vetoed_count
+                            "vetoed_count": vetoed_count,
+                            "llm_calls_total": llm_calls_total,
+                            "cache_hits_total": cache_hits_total,
                         }
 
                 except Exception as e:
@@ -761,6 +855,10 @@ class SmartBacktestService:
                     "approved": approved_count,
                     "vetoed": vetoed_count
                 },
+                "efficiency": {
+                    "llm_calls": llm_calls_total,
+                    "cache_hits": cache_hits_total,
+                },
                 "saved_to": path
             }
 
@@ -796,6 +894,8 @@ class SmartBacktestService:
             "index": new_index,
             "progress": session.progress,
             "observation": observation.to_summary(),
+            "hub_status": decision.extra.get("hub_status") if decision.extra else None,
+            "call_metrics": decision.extra.get("call_metrics") if decision.extra else {},
             "decision": decision.to_dict(),
             "closed_trades": [t.to_dict() for t in closed]
         }
@@ -854,5 +954,4 @@ async def get_smart_backtest_service() -> SmartBacktestService:
     global _smart_backtest_service
     if _smart_backtest_service is None:
         _smart_backtest_service = SmartBacktestService()
-        await _smart_backtest_service.initialize()
     return _smart_backtest_service

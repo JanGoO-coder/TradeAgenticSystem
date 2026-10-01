@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 
-from app.services.llm_service import get_gemini_service
+from app.services.llm_service import get_llm_service
 from app.services.strategy_store import get_strategy_store
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
@@ -53,10 +53,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
     Send a chat message and get an AI-powered response.
 
     Uses RAG to retrieve relevant strategy sections and
-    Gemini to generate contextual responses.
+    LM Studio to generate contextual responses.
     """
     try:
-        gemini = get_gemini_service()
+        llm = get_llm_service()
         strategy_store = await get_strategy_store()
 
         # Search for relevant strategies
@@ -93,7 +93,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         prompt = "\n\n".join(prompt_parts)
 
         # Generate response
-        response = await gemini.generate(
+        response = await llm.generate(
             prompt=prompt,
             mode="verbose",
             system_instruction=SYSTEM_PROMPT,

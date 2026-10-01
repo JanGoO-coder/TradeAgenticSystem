@@ -5,7 +5,7 @@ Data structures for backtesting sessions, decisions, and performance tracking.
 """
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict, Any
 from enum import Enum
 import json
 import uuid
@@ -52,6 +52,7 @@ class BacktestDecision:
     # Analysis meta
     latency_ms: int = 0
     skipped: bool = False  # True if skipped due to no state change
+    extra: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> dict:
         d = {
@@ -70,7 +71,8 @@ class BacktestDecision:
             "exit_price": self.exit_price,
             "exit_index": self.exit_index,
             "latency_ms": self.latency_ms,
-            "skipped": self.skipped
+            "skipped": self.skipped,
+            "extra": self.extra,
         }
         return d
 
@@ -432,7 +434,8 @@ class BacktestSession:
                 observation_hash=dec_data.get("observation_hash", ""),
                 price_at_decision=dec_data.get("price_at_decision", 0),
                 latency_ms=dec_data.get("latency_ms", 0),
-                skipped=dec_data.get("skipped", False)
+                skipped=dec_data.get("skipped", False),
+                extra=dec_data.get("extra")
             )
             if dec_data.get("result"):
                 dec.result = TradeResult(dec_data["result"])

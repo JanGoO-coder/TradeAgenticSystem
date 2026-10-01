@@ -1,5 +1,35 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+async function throwApiError(res: Response, fallback: string): Promise<never> {
+    let detail = '';
+    try {
+        const text = await res.text();
+        if (text) {
+            try {
+                const parsed = JSON.parse(text) as { detail?: unknown; message?: unknown };
+                if (typeof parsed.detail === 'string') detail = parsed.detail;
+                else if (typeof parsed.message === 'string') detail = parsed.message;
+                else detail = text;
+            } catch {
+                detail = text;
+            }
+        }
+    } catch {
+        detail = '';
+    }
+
+    const suffix = detail ? `: ${detail}` : '';
+    throw new Error(`${fallback} (status ${res.status})${suffix}`);
+}
+
+function withBackendConnectionHint(error: unknown, action: string): Error {
+    if (error instanceof TypeError) {
+        return new Error(`${action}: cannot reach backend at ${API_BASE_URL}. Ensure FastAPI is running on port 8000.`);
+    }
+    if (error instanceof Error) return error;
+    return new Error(`${action}: unknown request error`);
+}
+
 // MT5 Connection Types
 export interface MT5TerminalInfo {
     connected: boolean;
@@ -424,18 +454,130 @@ export interface AgentObservation {
 export interface AgentDecision {
     decision: 'TRADE' | 'WAIT' | 'NO_TRADE';
     confidence: number;
-    reasoning: string | null;
+    reasoning?: string | null;
     brief_reason: string;
     rule_citations: string[];
     setup: {
         direction: 'LONG' | 'SHORT';
-        entry_zone: { low: number; high: number };
+        entry_zone?: { low: number; high: number };
+        entry_price?: number;
+        entry?: number;
         stop_loss: number;
-        take_profits: number[];
-        invalidation: string;
+        take_profits?: number[];
+        take_profit?: number;
+        invalidation?: string;
     } | null;
-    latency_ms: number;
-    mode: string;
+    latency_ms?: number;
+    total_latency_ms?: number;
+    mode?: string;
+}
+
+// ============================================================================
+// Agentic Hub API
+// ============================================================================
+
+export interface HubDecisionRequest {
+    symbol: string;
+    timestamp?: string;
+    timeframe_bars: Record<string, OHLCV[]>;
+    account_balance?: number;
+    risk_pct?: number;
+    economic_calendar?: Array<Record<string, unknown>>;
+    open_trades?: Array<Record<string, unknown>>;
+    force_recompute?: boolean;
+}
+
+export interface HubCallMetrics {
+    llm_calls: number;
+    subagent_calls: number;
+    tool_calls: number;
+    cache_hits: number;
+    cache_misses: number;
+}
+
+export interface HubDecisionResponse {
+    symbol: string;
+    timestamp: string;
+    bias: string;
+    draw: string;
+    poi: string | null;
+    entry: number | null;
+    sl: number | null;
+    tp: number | null;
+    rr: number | null;
+    size: number | null;
+    session: string;
+    status: 'pending' | 'active' | 'no-trade';
+    reason: string;
+    confluences: string[];
+    vetoes: string[];
+    llm_called: boolean;
+    cache_hit: boolean;
+    journal_id: string | null;
+    call_metrics: HubCallMetrics;
+    metadata: Record<string, unknown>;
+}
+
+export interface HubStateResponse {
+    symbol: string;
+    state: Record<string, unknown>;
+}
+
+export interface HubJournalEntry {
+    journal_id: string;
+    timestamp: string;
+    symbol: string;
+    status: 'pending' | 'active' | 'no-trade';
+    reason: string;
+    bias: string;
+    session: string;
+    confluences: string[];
+    vetoes: string[];
+    entry: number | null;
+    sl: number | null;
+    tp: number | null;
+    rr: number | null;
+    size: number | null;
+    llm_called: boolean;
+    cache_hit: boolean;
+    metadata: Record<string, unknown>;
+}
+
+export interface HubJournalResponse {
+    symbol: string;
+    count: number;
+    entries: HubJournalEntry[];
+}
+
+export async function getHubDecision(payload: HubDecisionRequest): Promise<HubDecisionResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/hub/decision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error('Failed to get hub decision');
+    return res.json();
+}
+
+export async function getHubState(symbol: string): Promise<HubStateResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/hub/state/${encodeURIComponent(symbol)}`);
+    if (!res.ok) throw new Error('Failed to fetch hub state');
+    return res.json();
+}
+
+export async function getHubJournal(symbol: string, limit = 100): Promise<HubJournalResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/hub/journal/${encodeURIComponent(symbol)}?limit=${limit}`);
+    if (!res.ok) throw new Error('Failed to fetch hub journal');
+    return res.json();
+}
+
+export async function resetHubSymbol(symbol: string, balance?: number): Promise<{ symbol: string; reset: boolean }> {
+    const query = typeof balance === 'number' ? `?balance=${encodeURIComponent(balance.toString())}` : '';
+    const res = await fetch(`${API_BASE_URL}/api/v1/hub/reset/${encodeURIComponent(symbol)}${query}`, {
+        method: 'POST',
+    });
+    if (!res.ok) throw new Error('Failed to reset hub symbol state');
+    return res.json();
 }
 
 export interface AgentAnalysisResponse {
@@ -563,9 +705,9 @@ export interface BacktestMT5Status {
 export interface BacktestSession {
     session_id: string;
     symbol: string;
-    from_date: string;
-    to_date: string;
-    status: 'created' | 'running' | 'paused' | 'completed' | 'error';
+    start_date: string | null;
+    end_date: string | null;
+    status: 'CREATED' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'ERROR';
     progress: number;
     current_index: number;
     total_candles: number;
@@ -573,29 +715,32 @@ export interface BacktestSession {
 }
 
 export interface BacktestTrade {
-    id: string;
+    id?: string;
+    trade_id?: string;
     direction: 'LONG' | 'SHORT';
     entry_price: number;
     entry_time: string;
     stop_loss: number;
-    take_profits: number[];
-    status: 'open' | 'won' | 'lost' | 'breakeven';
+    take_profit?: number;
+    take_profits?: number[];
+    result?: string;
+    status: 'open' | 'won' | 'lost' | 'breakeven' | 'skipped';
     exit_price?: number;
     exit_time?: string;
     pnl_r?: number;
-    rule_citations: string[];
+    rule_citations?: string[];
 }
 
 export interface BacktestPerformance {
     total_trades: number;
-    wins: number;
-    losses: number;
-    breakeven: number;
+    winning_trades: number;
+    losing_trades: number;
+    breakeven_trades: number;
     win_rate: number;
     total_pnl_r: number;
     max_drawdown_r: number;
     expectancy_r: number;
-    equity_curve: Array<{ timestamp: string; equity: number }>;
+    equity_curve: number[];
 }
 
 export interface BacktestResults {
@@ -610,9 +755,13 @@ export interface BacktestResults {
 
 // Backtest Functions
 export async function getBacktestMT5Status(): Promise<BacktestMT5Status> {
-    const res = await fetch(`${API_BASE_URL}/api/v1/backtest/mt5-status`);
-    if (!res.ok) throw new Error('Failed to get MT5 status');
-    return res.json();
+    try {
+        const res = await fetch(`${API_BASE_URL}/api/v1/backtest/mt5-status`);
+        if (!res.ok) await throwApiError(res, 'Failed to get MT5 status');
+        return res.json();
+    } catch (error) {
+        throw withBackendConnectionHint(error, 'Failed to get MT5 status');
+    }
 }
 
 export async function createBacktestSession(
@@ -641,10 +790,15 @@ export async function createBacktestSession(
     return res.json();
 }
 
-export async function getBacktestSession(): Promise<BacktestSession> {
-    const res = await fetch(`${API_BASE_URL}/api/v1/backtest/session`);
-    if (!res.ok) throw new Error('Failed to get backtest session');
-    return res.json();
+export async function getBacktestSession(): Promise<BacktestSession | null> {
+    try {
+        const res = await fetch(`${API_BASE_URL}/api/v1/backtest/session`);
+        if (!res.ok) await throwApiError(res, 'Failed to get backtest session');
+        const data = await res.json();
+        return data ?? null;
+    } catch (error) {
+        throw withBackendConnectionHint(error, 'Failed to get backtest session');
+    }
 }
 
 export async function listBacktestSessions(): Promise<{ count: number; sessions: BacktestSession[] }> {
@@ -654,23 +808,31 @@ export async function listBacktestSessions(): Promise<{ count: number; sessions:
 }
 
 export async function stepForward(bars = 1): Promise<Record<string, unknown>> {
-    const res = await fetch(`${API_BASE_URL}/api/v1/backtest/step/forward`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bars }),
-    });
-    if (!res.ok) throw new Error('Failed to step forward');
-    return res.json();
+    try {
+        const res = await fetch(`${API_BASE_URL}/api/v1/backtest/step/forward`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bars }),
+        });
+        if (!res.ok) await throwApiError(res, 'Failed to step forward');
+        return res.json();
+    } catch (error) {
+        throw withBackendConnectionHint(error, 'Failed to step forward');
+    }
 }
 
 export async function stepBackward(bars = 1): Promise<Record<string, unknown>> {
-    const res = await fetch(`${API_BASE_URL}/api/v1/backtest/step/backward`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bars }),
-    });
-    if (!res.ok) throw new Error('Failed to step backward');
-    return res.json();
+    try {
+        const res = await fetch(`${API_BASE_URL}/api/v1/backtest/step/backward`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bars }),
+        });
+        if (!res.ok) await throwApiError(res, 'Failed to step backward');
+        return res.json();
+    } catch (error) {
+        throw withBackendConnectionHint(error, 'Failed to step backward');
+    }
 }
 
 export async function jumpToIndex(index: number): Promise<Record<string, unknown>> {
@@ -724,7 +886,7 @@ export function runBatchBacktest(
     eventSource.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
-            if (data.type === 'completed') {
+            if (data.event === 'completed') {
                 onComplete();
                 eventSource.close();
             } else {
@@ -753,7 +915,7 @@ export interface ServicesHealth {
     timestamp: string;
     services: {
         chromadb: { status: string; connected?: boolean; error?: string };
-        gemini: { status: string; rpm_limit?: number; calls_last_minute?: number; error?: string };
+        llm: { status: string; rpm_limit?: number; calls_last_minute?: number; error?: string };
         strategy_store: { status: string; rules_loaded?: number; error?: string };
     };
 }

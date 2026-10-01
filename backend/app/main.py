@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.api.v1 import analysis, session, health, chat, execution, data, market_data
 from app.api.v1 import agent, backtest, ai_chat, strategies
+from app.api.v1 import hub
 from app.api.v1.websocket import router as websocket_router
 
 # Get settings
@@ -77,6 +78,12 @@ app.include_router(
 app.include_router(
     backtest.router,
     prefix=settings.api_v1_prefix
+)
+
+# Agentic Hub endpoints
+app.include_router(
+    hub.router,
+    prefix=settings.api_v1_prefix,
 )
 
 # AI Chat (RAG-powered)

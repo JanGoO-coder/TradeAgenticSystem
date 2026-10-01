@@ -317,7 +317,7 @@ async def get_rate_limit_status() -> dict:
     """
     Get current rate limiting status.
     """
-    from app.services.llm_service import get_gemini_service
+    from app.services.llm_service import get_llm_service
 
-    service = get_gemini_service()
+    service = get_llm_service()
     return service.get_rate_limit_status()

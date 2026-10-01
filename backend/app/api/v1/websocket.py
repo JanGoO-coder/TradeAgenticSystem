@@ -7,6 +7,9 @@ from datetime import datetime
 
 from app.agent.engine import get_agent_engine, TradingAgentEngine
 from app.core.config import get_settings
+from app.hub.master_agent import get_master_agent
+from app.domain.hub import HubDecisionRequest
+from app.hub.adapters import hub_to_legacy_response
 
 router = APIRouter(tags=["WebSocket"])
 
@@ -105,8 +108,22 @@ async def handle_analyze(websocket: WebSocket, engine: TradingAgentEngine, paylo
     }, websocket)
     
     try:
-        # Run analysis
-        result = engine.analyze(payload)
+        settings = get_settings()
+        if settings.hub_enabled:
+            hub = await get_master_agent()
+            hub_request = HubDecisionRequest(
+                symbol=payload.get("symbol", "EURUSD"),
+                timestamp=payload.get("timestamp"),
+                timeframe_bars=payload.get("timeframe_bars", {}),
+                account_balance=float(payload.get("account_balance", 10000.0)),
+                risk_pct=float(payload.get("risk_pct", settings.hub_risk_per_trade_pct)),
+                economic_calendar=payload.get("economic_calendar", []),
+            )
+            hub_decision = await hub.decision_cycle(hub_request)
+            result = hub_to_legacy_response(hub_decision)
+        else:
+            # Run legacy analysis
+            result = engine.analyze(payload)
         
         await manager.send_personal_message({
             "type": "analysis_complete",
@@ -268,7 +285,21 @@ async def live_data_stream(websocket: WebSocket, symbol: str):
                     snapshot = generate_sample_snapshot(symbol, config)
                 
                 # Run analysis
-                result = engine.analyze(snapshot)
+                settings = get_settings()
+                if settings.hub_enabled:
+                    hub = await get_master_agent()
+                    hub_request = HubDecisionRequest(
+                        symbol=symbol,
+                        timestamp=snapshot.get("timestamp"),
+                        timeframe_bars=snapshot.get("timeframe_bars", {}),
+                        account_balance=float(snapshot.get("account_balance", 10000.0)),
+                        risk_pct=float(snapshot.get("risk_pct", settings.hub_risk_per_trade_pct)),
+                        economic_calendar=snapshot.get("economic_calendar", []),
+                    )
+                    hub_decision = await hub.decision_cycle(hub_request)
+                    result = hub_to_legacy_response(hub_decision)
+                else:
+                    result = engine.analyze(snapshot)
                 
                 # Send to client
                 await websocket.send_json({

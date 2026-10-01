@@ -18,7 +18,7 @@ from typing import Optional, List, Literal
 import json
 
 from app.core.config import get_settings
-from app.services.llm_service import get_gemini_service, GeminiService
+from app.services.llm_service import get_llm_service, LLMService
 from app.services.strategy_store import get_strategy_store, StrategyStore
 from app.tools.observer import run_event_observation
 
@@ -54,7 +54,7 @@ class MainAgent:
 
     def __init__(self):
         self.settings = get_settings()
-        self.gemini: Optional[GeminiService] = None
+        self.llm: Optional[LLMService] = None
         self.strategy_store: Optional[StrategyStore] = None
         self._initialized = False
         
@@ -70,7 +70,7 @@ class MainAgent:
         if self._initialized:
             return
 
-        self.gemini = get_gemini_service()
+        self.llm = get_llm_service()
         self.strategy_store = await get_strategy_store()
         
         # Initialize ICT components
@@ -153,7 +153,7 @@ class MainAgent:
         
         # ==== STEP 5: CALL LLM (proposes decision) ====
         llm_start = datetime.utcnow()
-        response = await self.gemini.generate(
+        response = await self.llm.generate(
             prompt=analysis_prompt,
             mode=mode,
             system_instruction=system_prompt,
@@ -179,7 +179,7 @@ class MainAgent:
         )
         
         # Record in context
-        context.record_decision(final_decision.decision, final_decision.confidence)
+        context.record_decision(final_decision)
         
         # Calculate total latency
         total_latency = int((datetime.utcnow() - start_time).total_seconds() * 1000)
@@ -193,6 +193,42 @@ class MainAgent:
         llm_latency_ms: int
     ) -> ProposedDecision:
         """Parse LLM response into ProposedDecision."""
+        def _parse_float(value) -> Optional[float]:
+            """Parse a direct scalar into float, else None."""
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value.strip())
+                except (TypeError, ValueError):
+                    return None
+            return None
+
+        def _safe_float(value, default: float = 0.0) -> float:
+            """Convert varied numeric payloads to float safely."""
+            direct = _parse_float(value)
+            if direct is not None:
+                return direct
+
+            if isinstance(value, list):
+                for item in value:
+                    parsed_item = _parse_float(item)
+                    if parsed_item is not None:
+                        return parsed_item
+                return default
+
+            if isinstance(value, dict):
+                for key in ("value", "price", "target", "tp", "take_profit"):
+                    if key in value:
+                        parsed_field = _parse_float(value.get(key))
+                        if parsed_field is not None:
+                            return parsed_field
+                return default
+
+            return default
+
         content = response.get("content", "")
         parsed = response.get("parsed")
         
@@ -201,11 +237,22 @@ class MainAgent:
             setup = None
             if parsed.get("setup"):
                 setup_data = parsed["setup"]
+
+                entry_price = _safe_float(
+                    setup_data.get("entry_price", setup_data.get("entry", 0.0)),
+                    0.0,
+                )
+                stop_loss = _safe_float(setup_data.get("stop_loss", 0.0), 0.0)
+                take_profit = _safe_float(
+                    setup_data.get("take_profit", setup_data.get("take_profits", 0.0)),
+                    0.0,
+                )
+
                 setup = TradeSetup(
                     direction=setup_data.get("direction", "LONG"),
-                    entry_price=float(setup_data.get("entry_price", 0)),
-                    stop_loss=float(setup_data.get("stop_loss", 0)),
-                    take_profit=float(setup_data.get("take_profit", 0)),
+                    entry_price=float(entry_price),
+                    stop_loss=float(stop_loss),
+                    take_profit=float(take_profit),
                     entry_model=setup_data.get("entry_model", ""),
                     pd_array_type=setup_data.get("pd_array_type", "")
                 )
@@ -225,7 +272,6 @@ class MainAgent:
                 brief_reason=parsed.get("brief_reason", ""),
                 rule_citations=valid_citations,
                 setup=setup,
-                context_update=parsed.get("context_update", ""),
                 llm_latency_ms=llm_latency_ms
             )
         

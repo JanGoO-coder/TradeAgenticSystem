@@ -13,6 +13,13 @@ interface ReasoningPanelProps {
 export function ReasoningPanel({ decision, isLoading = false, className = '' }: ReasoningPanelProps) {
     const [isExpanded, setIsExpanded] = useState(true);
 
+    const latencyMs = decision ? (decision.latency_ms ?? decision.total_latency_ms ?? 0) : 0;
+    const entryValue = decision?.setup?.entry_zone
+        ? (decision.setup.entry_zone.low + decision.setup.entry_zone.high) / 2
+        : (decision?.setup?.entry_price ?? decision?.setup?.entry ?? 0);
+    const takeProfits = decision?.setup?.take_profits
+        ?? (typeof decision?.setup?.take_profit === 'number' ? [decision.setup.take_profit] : []);
+
     if (isLoading) {
         return (
             <div className={`bg-slate-800 rounded-lg p-4 ${className}`}>
@@ -68,7 +75,7 @@ export function ReasoningPanel({ decision, isLoading = false, className = '' }: 
                     </span>
                 </div>
                 <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-500">{decision.latency_ms}ms</span>
+                    <span className="text-xs text-slate-500">{latencyMs}ms</span>
                     {isExpanded ? (
                         <ChevronUp className="w-4 h-4 text-slate-400" />
                     ) : (
@@ -124,19 +131,17 @@ export function ReasoningPanel({ decision, isLoading = false, className = '' }: 
                                     </span>
                                 </div>
                                 <div className="flex justify-between">
-                                    <span className="text-slate-400">Entry Zone:</span>
-                                    <span className="text-white">
-                                        {decision.setup.entry_zone.low.toFixed(5)} - {decision.setup.entry_zone.high.toFixed(5)}
-                                    </span>
+                                    <span className="text-slate-400">Entry:</span>
+                                    <span className="text-white">{entryValue.toFixed(5)}</span>
                                 </div>
                                 <div className="flex justify-between">
                                     <span className="text-slate-400">Stop Loss:</span>
                                     <span className="text-red-400">{decision.setup.stop_loss.toFixed(5)}</span>
                                 </div>
                                 <div className="flex justify-between">
-                                    <span className="text-slate-400">Take Profits:</span>
+                                    <span className="text-slate-400">Take Profit:</span>
                                     <span className="text-green-400">
-                                        {decision.setup.take_profits.map(tp => tp.toFixed(5)).join(', ')}
+                                        {takeProfits.length > 0 ? takeProfits.map(tp => tp.toFixed(5)).join(', ') : '-'}
                                     </span>
                                 </div>
                                 {decision.setup.invalidation && (
@@ -167,7 +172,7 @@ export function ReasoningPanel({ decision, isLoading = false, className = '' }: 
                     {/* Mode indicator */}
                     <div className="flex items-center gap-2 text-xs text-slate-500">
                         <Clock className="w-3 h-3" />
-                        Mode: {decision.mode}
+                        Mode: {decision.mode ?? 'unknown'}
                     </div>
                 </div>
             )}

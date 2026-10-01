@@ -40,6 +40,7 @@ class MT5Service:
     def __init__(self):
         self._connected = False
         self._initialized = False
+        self._last_error: Optional[str] = None
         self._cache_dir = Path("data/tick_cache")
         self._cache_ttl_hours = 24  # Cache expires after 24 hours
 
@@ -53,7 +54,18 @@ class MT5Service:
         """Check if connected to MT5 terminal."""
         return self._connected and self._initialized
 
-    def connect(self, login: Optional[int] = None, password: Optional[str] = None, server: Optional[str] = None) -> bool:
+    @property
+    def last_error(self) -> Optional[str]:
+        """Get the last MT5 error message."""
+        return self._last_error
+
+    def connect(
+        self,
+        login: Optional[int] = None,
+        password: Optional[str] = None,
+        server: Optional[str] = None,
+        terminal_path: Optional[str] = None,
+    ) -> bool:
         """
         Initialize MT5 connection.
 
@@ -66,24 +78,41 @@ class MT5Service:
             True if connection successful, False otherwise
         """
         if not MT5_AVAILABLE:
-            logger.error("MetaTrader5 package not installed")
+            self._last_error = "MetaTrader5 package not installed"
+            logger.error(self._last_error)
             return False
 
-        # Initialize MT5 connection
-        if not mt5.initialize():
+        # Resolve terminal path from explicit arg or settings
+        resolved_terminal_path = terminal_path
+        if resolved_terminal_path is None:
+            try:
+                from app.core.config import get_settings
+
+                resolved_terminal_path = get_settings().mt5_terminal_path
+            except Exception:
+                resolved_terminal_path = None
+
+        init_kwargs = {}
+        if resolved_terminal_path:
+            init_kwargs["path"] = resolved_terminal_path
+
+        # If credentials are provided, initialize directly with account context
+        if login and password and server:
+            init_kwargs.update({
+                "login": login,
+                "password": password,
+                "server": server,
+            })
+
+        if not mt5.initialize(**init_kwargs):
             error = mt5.last_error()
-            logger.error(f"MT5 initialization failed: {error}")
+            self._last_error = f"MT5 initialization failed: {error}"
+            logger.error(self._last_error)
             return False
 
         self._initialized = True
 
-        # Login if credentials provided
-        if login and password and server:
-            if not mt5.login(login, password, server=server):
-                error = mt5.last_error()
-                logger.error(f"MT5 login failed: {error}")
-                return False
-
+        self._last_error = None
         self._connected = True
         logger.info("MT5 connection established")
         return True
@@ -94,6 +123,7 @@ class MT5Service:
             mt5.shutdown()
         self._connected = False
         self._initialized = False
+        self._last_error = None
         logger.info("MT5 connection closed")
 
     def get_terminal_info(self) -> Optional[Dict]:

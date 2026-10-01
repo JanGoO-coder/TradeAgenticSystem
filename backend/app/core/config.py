@@ -1,6 +1,6 @@
 """Application configuration settings."""
 from pydantic_settings import BaseSettings
-from typing import Optional, Literal
+from typing import Literal
 from functools import lru_cache
 
 
@@ -37,25 +37,17 @@ class Settings(BaseSettings):
     mt5_login: int | None = None
     mt5_password: str | None = None
     mt5_server: str | None = None
+    mt5_terminal_path: str | None = None
 
     # =========================================================================
-    # LLM Configuration
+    # LLM Configuration (LM Studio local API)
     # =========================================================================
-    # Groq
-    groq_api_key: str | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
-    
-    # DeepSeek (uses OpenAI-compatible API)
-    # Models: deepseek-chat (fast), deepseek-reasoner (thinking/complex reasoning)
-    deepseek_api_key: str | None = None
-    deepseek_model: str = "deepseek-chat"
-    deepseek_base_url: str = "https://api.deepseek.com/v1"
-    
-    # Legacy Gemini settings (for embeddings)
-    gemini_api_key: str | None = None
-    google_api_key: str | None = None  # Alternative name for gemini_api_key
-    gemini_model: str = "gemini-2.5-flash"
-    gemini_embedding_model: str = "models/gemini-embedding-001"
+    lmstudio_base_url: str = "http://localhost:1234"
+    lmstudio_api_token: str | None = None
+    lmstudio_model: str = "google/gemma-4-e2b"
+    lmstudio_context_length: int | None = None
+    lmstudio_reasoning: Literal["off", "low", "medium", "high", "on"] | None = None
+    lmstudio_auto_load_model: bool = True
 
     # Rate limiting
     llm_rpm_limit: int = 1500          # Requests per minute
@@ -81,6 +73,23 @@ class Settings(BaseSettings):
     backtest_max_concurrent: int = 10     # Max parallel agent calls
     backtest_selective_mode: bool = True  # Only analyze on state changes
     backtest_sessions_dir: str = "data/sessions"
+
+    # =========================================================================
+    # Agentic Hub Configuration
+    # =========================================================================
+    hub_enabled: bool = True
+    hub_rr_minimum: float = 3.0
+    hub_risk_per_trade_pct: float = 0.5
+    hub_risk_cap_pct: float = 1.0
+    hub_daily_loss_limit_pct: float = 4.0
+    hub_total_drawdown_limit_pct: float = 8.0
+    hub_max_concurrent_trades: int = 2
+    hub_killzone_london_start_utc: str = "02:00"
+    hub_killzone_london_end_utc: str = "05:00"
+    hub_killzone_ny_start_utc: str = "07:00"
+    hub_killzone_ny_end_utc: str = "10:00"
+    hub_profit_target_pct: float = 10.0
+    hub_scale_down_threshold_pct: float = 2.0
 
     class Config:
         env_file = ".env"

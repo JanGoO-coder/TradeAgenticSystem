@@ -1,13 +1,22 @@
 """Analysis API endpoints."""
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends
 from typing import List
+from datetime import datetime
 
 from app.domain.requests import AnalysisRequest, BatchAnalysisRequest
-from app.domain.responses import TradeSetupResponse
 from app.agent.engine import get_agent_engine, TradingAgentEngine
 from app.core.exceptions import AgentError
+from app.core.config import get_settings
+from app.domain.hub import HubDecisionRequest
+from app.hub.master_agent import get_master_agent
+from app.hub.adapters import hub_to_legacy_response
 
 router = APIRouter(prefix="/analyze", tags=["Analysis"])
+
+
+def _parse_timestamp(value: str) -> datetime:
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    return datetime.fromisoformat(normalized)
 
 
 @router.post("", response_model=dict)
@@ -27,6 +36,20 @@ async def analyze_snapshot(
     - checklist: Pass/fail for all required checks
     - explanation: Human-readable reasoning
     """
+    settings = get_settings()
+    if settings.hub_enabled:
+        hub = await get_master_agent()
+        hub_request = HubDecisionRequest(
+            symbol=request.symbol,
+            timestamp=_parse_timestamp(request.timestamp),
+            timeframe_bars=request.timeframe_bars,
+            account_balance=request.account_balance,
+            risk_pct=request.risk_pct,
+            economic_calendar=[e.model_dump() for e in request.economic_calendar],
+        )
+        hub_decision = await hub.decision_cycle(hub_request)
+        return hub_to_legacy_response(hub_decision)
+
     if not engine.is_available:
         raise AgentError(f"Trading agent not available: {engine.last_error}")
     
@@ -59,6 +82,23 @@ async def analyze_batch(
     
     Useful for scanning multiple pairs or timeframes.
     """
+    settings = get_settings()
+    if settings.hub_enabled:
+        hub = await get_master_agent()
+        results: List[dict] = []
+        for snapshot_request in request.snapshots:
+            hub_request = HubDecisionRequest(
+                symbol=snapshot_request.symbol,
+                timestamp=_parse_timestamp(snapshot_request.timestamp),
+                timeframe_bars=snapshot_request.timeframe_bars,
+                account_balance=snapshot_request.account_balance,
+                risk_pct=snapshot_request.risk_pct,
+                economic_calendar=[e.model_dump() for e in snapshot_request.economic_calendar],
+            )
+            hub_decision = await hub.decision_cycle(hub_request)
+            results.append(hub_to_legacy_response(hub_decision))
+        return results
+
     if not engine.is_available:
         raise AgentError(f"Trading agent not available: {engine.last_error}")
     

@@ -8,8 +8,7 @@ langgraph>=0.0.40
 langchain>=0.1.0
 MetaTrader5>=5.0.45
 
-# Gemini LLM
-google-generativeai>=0.8.0
+# HTTP calls to LM Studio REST API
 
 # Rate limiting
 aiolimiter>=1.1.0

@@ -10,13 +10,13 @@ import {
     stepBackward,
     getBacktestResults,
     getEquityCurve,
-    analyzeAtPosition,
     BacktestSession,
     BacktestResults,
     AgentDecision,
     getMode,
     getBacktestMT5Status,
-    connectMT5
+    connectMT5,
+    HubCallMetrics,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -54,7 +54,10 @@ export default function AgentBacktestPage() {
     const [isPlaying, setIsPlaying] = useState(false);
     const [speed, setSpeed] = useState(1);
     const [currentDecision, setCurrentDecision] = useState<AgentDecision | null>(null);
-    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [hubStatus, setHubStatus] = useState<'pending' | 'active' | 'no-trade' | null>(null);
+    const [hubConfluences, setHubConfluences] = useState<string[]>([]);
+    const [hubVetoes, setHubVetoes] = useState<string[]>([]);
+    const [hubCallMetrics, setHubCallMetrics] = useState<HubCallMetrics | null>(null);
     const [createError, setCreateError] = useState<string | null>(null);
 
     // MT5 Status query
@@ -78,11 +81,12 @@ export default function AgentBacktestPage() {
     });
 
     // Session query
-    const { data: session, refetch: refetchSession } = useQuery<BacktestSession>({
+    const { data: session, refetch: refetchSession } = useQuery<BacktestSession | null>({
         queryKey: ["agentBacktestSession"],
         queryFn: getBacktestSession,
         retry: false,
         refetchOnWindowFocus: false,
+        throwOnError: false,
     });
 
     // Results query
@@ -125,25 +129,70 @@ export default function AgentBacktestPage() {
     // Step forward mutation
     const stepForwardMutation = useMutation({
         mutationFn: (bars: number) => stepForward(bars),
-        onSuccess: async () => {
+        onSuccess: async (result) => {
             setRateLimitError(null);
             refetchSession();
-            // Run analysis at new position
-            setIsAnalyzing(true);
-            try {
-                const result = await analyzeAtPosition('verbose');
-                if (result.decision) {
-                    setCurrentDecision(result.decision as AgentDecision);
+            if (typeof result.hub_status === 'string') {
+                const normalized = result.hub_status.toLowerCase();
+                if (normalized === 'pending' || normalized === 'active' || normalized === 'no-trade') {
+                    setHubStatus(normalized);
                 }
-            } catch {
-                // Analysis may fail if no data
             }
-            setIsAnalyzing(false);
+            if (Array.isArray(result.confluences)) {
+                setHubConfluences(result.confluences.filter((x): x is string => typeof x === 'string'));
+            }
+            if (Array.isArray(result.vetoes)) {
+                setHubVetoes(result.vetoes.filter((x): x is string => typeof x === 'string'));
+            }
+            if (result.call_metrics && typeof result.call_metrics === 'object') {
+                const cm = result.call_metrics as Partial<HubCallMetrics>;
+                setHubCallMetrics({
+                    llm_calls: Number(cm.llm_calls ?? 0),
+                    subagent_calls: Number(cm.subagent_calls ?? 0),
+                    tool_calls: Number(cm.tool_calls ?? 0),
+                    cache_hits: Number(cm.cache_hits ?? 0),
+                    cache_misses: Number(cm.cache_misses ?? 0),
+                });
+            }
+            if (result.decision) {
+                const decisionObj = result.decision as AgentDecision;
+                const extra = (decisionObj as unknown as { extra?: { hub_decision?: { reason?: string; confluences?: string[]; vetoes?: string[]; status?: string; llm_called?: boolean; call_metrics?: Partial<HubCallMetrics> } } }).extra;
+                if (extra?.hub_decision) {
+                    const hd = extra.hub_decision;
+                    if (typeof hd.reason === 'string') {
+                        decisionObj.brief_reason = hd.reason;
+                    }
+                    if (Array.isArray(hd.confluences)) {
+                        decisionObj.rule_citations = hd.confluences.slice(0, 8);
+                    }
+                    if (typeof hd.status === 'string') {
+                        const s = hd.status.toLowerCase();
+                        if (s === 'pending' || s === 'active' || s === 'no-trade') {
+                            setHubStatus(s);
+                        }
+                    }
+                    if (typeof hd.llm_called === 'boolean' || hd.call_metrics) {
+                        const cm = hd.call_metrics ?? {};
+                        setHubCallMetrics({
+                            llm_calls: Number(cm.llm_calls ?? 0),
+                            subagent_calls: Number(cm.subagent_calls ?? 0),
+                            tool_calls: Number(cm.tool_calls ?? 0),
+                            cache_hits: Number(cm.cache_hits ?? 0),
+                            cache_misses: Number(cm.cache_misses ?? 0),
+                        });
+                    }
+                }
+                setCurrentDecision(decisionObj);
+            }
             refetchResults();
         },
         onError: (error: Error) => {
-            if (error.message.includes('429') || error.message.toLowerCase().includes('rate limit')) {
+            const msg = error.message.toLowerCase();
+            if (error.message.includes('429') || msg.includes('rate limit')) {
                 setRateLimitError('LLM API rate limit exceeded. Please wait a few seconds before continuing.');
+                setIsPlaying(false);
+            } else if (msg.includes('cannot reach backend') || msg.includes('failed to fetch') || msg.includes('err_connection_refused')) {
+                setRateLimitError('Backend API is unreachable on port 8000. Start/restart FastAPI backend and try again.');
                 setIsPlaying(false);
             } else {
                 setRateLimitError(error.message);
@@ -219,7 +268,7 @@ export default function AgentBacktestPage() {
         staleTime: 30000,
     });
 
-    const hasSession = !!session && session.status !== 'error';
+    const hasSession = !!session && session.status !== 'ERROR';
     const progress = session?.progress ?? 0;
 
     return (
@@ -261,7 +310,7 @@ export default function AgentBacktestPage() {
                         )}
 
                         {hasSession && (
-                            <Badge variant={session.status === 'running' ? 'default' : 'secondary'}>
+                            <Badge variant={session.status === 'RUNNING' ? 'default' : 'secondary'}>
                                 {session.status.toUpperCase()}
                             </Badge>
                         )}
@@ -506,12 +555,50 @@ export default function AgentBacktestPage() {
                             </div>
                         )}
 
+                        {hubStatus && (
+                            <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+                                <div className="flex flex-wrap items-center gap-2 mb-3">
+                                    <span className="text-xs uppercase tracking-wide text-slate-500">Hub Status</span>
+                                    <Badge className={
+                                        hubStatus === 'active'
+                                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                            : hubStatus === 'pending'
+                                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                                : 'bg-slate-500/20 text-slate-300 border border-slate-500/40'
+                                    }>
+                                        {hubStatus.toUpperCase()}
+                                    </Badge>
+                                    {hubCallMetrics && (
+                                        <>
+                                            <span className="text-xs text-slate-400">LLM calls: {hubCallMetrics.llm_calls}</span>
+                                            <span className="text-xs text-slate-400">Cache hits: {hubCallMetrics.cache_hits}</span>
+                                            <span className="text-xs text-slate-400">Sub-agent calls: {hubCallMetrics.subagent_calls}</span>
+                                        </>
+                                    )}
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <div className="p-2 rounded bg-slate-900 border border-slate-700">
+                                        <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Confluences</div>
+                                        <div className="text-xs text-slate-300">
+                                            {hubConfluences.length ? hubConfluences.join(', ') : 'none'}
+                                        </div>
+                                    </div>
+                                    <div className="p-2 rounded bg-slate-900 border border-slate-700">
+                                        <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Vetoes</div>
+                                        <div className="text-xs text-slate-300">
+                                            {hubVetoes.length ? hubVetoes.join(', ') : 'none'}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
                         {/* Main Grid */}
                         <div className="grid grid-cols-2 gap-6">
                             {/* Reasoning Panel */}
                             <ReasoningPanel
                                 decision={currentDecision}
-                                isLoading={isAnalyzing}
+                                isLoading={stepForwardMutation.isPending}
                             />
 
                             {/* Equity Curve */}
@@ -581,7 +668,7 @@ export default function AgentBacktestPage() {
                                                     </td>
                                                     <td className="py-2">
                                                         <div className="flex gap-1">
-                                                            {trade.rule_citations.slice(0, 2).map((rule, j) => (
+                                                            {(trade.rule_citations ?? []).slice(0, 2).map((rule, j) => (
                                                                 <span key={j} className="px-1 bg-purple-900/50 text-purple-300 rounded text-xs">
                                                                     {rule}
                                                                 </span>
